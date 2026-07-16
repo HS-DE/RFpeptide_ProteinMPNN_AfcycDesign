@@ -154,4 +154,8 @@ target chain A = 86 aa exact Stage 0 sequence
 peptide chain B = 17 aa and cyclic mask covers peptide only
 ```
 
+对应的修复后复合物结构已收录为
+`08_运行时分叉与修复证据/RFpep_Site_2_L17_17_0.pdb`，用于与 runtime audit
+和严格 Stage 2 QC 表逐项交叉核验。
+
 这条只证明修复后的工程链路可以闭环，不能据此直接扩大生产。

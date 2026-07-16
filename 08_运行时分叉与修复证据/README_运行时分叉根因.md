@@ -61,5 +61,8 @@ severe clash: no
 strict Stage 2: pass
 ```
 
-这只是工程 N1 smoke，不是生产候选，也不足以直接恢复 ProteinMPNN 或 Stage 5。
+本目录中的 `RFpep_Site_2_L17_17_0.pdb` 是该 N1-v2 smoke 的实际输出结构，
+用于核验 target/peptide 链身份、Site_2/hotspot 接触、cyclic geometry 和
+runtime audit 是否彼此一致。
 
+这只是工程 N1 smoke，不是生产候选，也不足以直接恢复 ProteinMPNN 或 Stage 5。
