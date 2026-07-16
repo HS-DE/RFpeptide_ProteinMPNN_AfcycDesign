@@ -1,7 +1,9 @@
 from __future__ import annotations
 
 import argparse
+import hashlib
 from pathlib import Path
+import subprocess
 from typing import Any, Iterable, Mapping
 
 from common import append_run_header, read_csv, resolve_path, rows_to_markdown, setup_logger, write_csv, write_markdown
@@ -16,6 +18,11 @@ JOB_FIELDS = [
     "stage0_mapping_csv",
     "stage0_hotspots_txt",
     "rfpeptides_root",
+    "runtime_git_commit",
+    "runtime_inference_utils_sha256",
+    "runtime_model_runners_sha256",
+    "runtime_run_inference_sha256",
+    "runtime_util_sha256",
     "working_directory",
     "output_prefix",
     "output_dir",
@@ -121,6 +128,26 @@ def _write_text_lf(path: Path, text: str) -> None:
         handle.write(text.rstrip() + "\n")
 
 
+def _sha256(path: Path) -> str:
+    digest = hashlib.sha256()
+    with path.open("rb") as handle:
+        for chunk in iter(lambda: handle.read(1024 * 1024), b""):
+            digest.update(chunk)
+    return digest.hexdigest()
+
+
+def _git_head(path: Path) -> str:
+    completed = subprocess.run(
+        ["git", "-C", str(path), "rev-parse", "HEAD"],
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+    if completed.returncode != 0:
+        raise RuntimeError(f"Could not resolve RFpeptides runtime Git commit under {path}: {completed.stderr.strip()}")
+    return completed.stdout.strip()
+
+
 def _build_command_lines(
     *,
     rfpeptides_root: Path,
@@ -135,7 +162,7 @@ def _build_command_lines(
     extra_overrides: list[str],
 ) -> list[str]:
     lines = [
-        f"./scripts/run_inference.py --config-name {config_name} \\",
+        f"python ./scripts/run_inference.py --config-name {config_name} \\",
         f"inference.output_prefix={_to_wsl_path(output_prefix)} \\",
         f"inference.num_designs={num_designs} \\",
         f"'contigmap.contigs=[{contig}]' \\",
@@ -167,7 +194,10 @@ def _run_script_text(
     conda_setup: str,
     conda_env: str,
     rfpeptides_root: Path,
+    runtime_git_commit: str,
+    runtime_hashes: Mapping[str, str],
 ) -> str:
+    runtime_root = _to_wsl_path(rfpeptides_root)
     lines = [
         "#!/bin/bash",
         "set -eo pipefail",
@@ -176,10 +206,52 @@ def _run_script_text(
         f"source {_source_path_arg(conda_setup)}",
         f"conda activate {_quote_bash(conda_env)}",
         "set -u",
+        f"export RFPEPTIDES_RUNTIME_ROOT={_quote_bash(runtime_root)}",
+        "export PYTHONPATH=\"${RFPEPTIDES_RUNTIME_ROOT}${PYTHONPATH:+:${PYTHONPATH}}\"",
+        f"export EXPECTED_RFPEPTIDES_COMMIT={_quote_bash(runtime_git_commit)}",
+        f"export EXPECTED_INFERENCE_UTILS_SHA256={_quote_bash(runtime_hashes['inference_utils'])}",
+        f"export EXPECTED_MODEL_RUNNERS_SHA256={_quote_bash(runtime_hashes['model_runners'])}",
+        f"export EXPECTED_RUN_INFERENCE_SHA256={_quote_bash(runtime_hashes['run_inference'])}",
+        f"export EXPECTED_UTIL_SHA256={_quote_bash(runtime_hashes['util'])}",
         "",
         "python - <<'PY'",
+        "import hashlib",
+        "import os",
+        "from pathlib import Path",
+        "import subprocess",
         "from types import SimpleNamespace",
+        "import rfdiffusion.util as rfd_util",
+        "import rfdiffusion.inference.model_runners as model_runners",
+        "import rfdiffusion.inference.utils as inference_utils",
         "from rfdiffusion.inference.utils import get_idx0_hotspots",
+        "runtime_root = Path(os.environ['RFPEPTIDES_RUNTIME_ROOT']).resolve()",
+        "expected_paths = {",
+        "    'inference_utils': runtime_root / 'rfdiffusion/inference/utils.py',",
+        "    'model_runners': runtime_root / 'rfdiffusion/inference/model_runners.py',",
+        "    'run_inference': runtime_root / 'scripts/run_inference.py',",
+        "    'util': runtime_root / 'rfdiffusion/util.py',",
+        "}",
+        "loaded_paths = {",
+        "    'inference_utils': Path(inference_utils.__file__).resolve(),",
+        "    'model_runners': Path(model_runners.__file__).resolve(),",
+        "    'util': Path(rfd_util.__file__).resolve(),",
+        "}",
+        "for key, loaded_path in loaded_paths.items():",
+        "    if loaded_path != expected_paths[key]:",
+        "        raise RuntimeError(f'RFpeptides runtime split-brain: {key} loaded from {loaded_path}, expected {expected_paths[key]}')",
+        "expected_hashes = {",
+        "    'inference_utils': os.environ['EXPECTED_INFERENCE_UTILS_SHA256'],",
+        "    'model_runners': os.environ['EXPECTED_MODEL_RUNNERS_SHA256'],",
+        "    'run_inference': os.environ['EXPECTED_RUN_INFERENCE_SHA256'],",
+        "    'util': os.environ['EXPECTED_UTIL_SHA256'],",
+        "}",
+        "for key, path in expected_paths.items():",
+        "    observed_hash = hashlib.sha256(path.read_bytes()).hexdigest()",
+        "    if observed_hash != expected_hashes[key]:",
+        "        raise RuntimeError(f'RFpeptides runtime file changed: {path}; observed={observed_hash}, expected={expected_hashes[key]}')",
+        "observed_commit = subprocess.check_output(['git', '-C', str(runtime_root), 'rev-parse', 'HEAD'], text=True).strip()",
+        "if observed_commit != os.environ['EXPECTED_RFPEPTIDES_COMMIT']:",
+        "    raise RuntimeError(f'RFpeptides runtime commit changed: observed={observed_commit}, expected={os.environ[\"EXPECTED_RFPEPTIDES_COMMIT\"]}')",
         "mappings = {",
         "    'receptor_con_ref_pdb_idx': [('A', 82), ('A', 84)],",
         "    'receptor_con_hal_idx0': [81, 83],",
@@ -188,7 +260,9 @@ def _run_script_text(
         "expected = [98, 100]",
         "if list(observed or []) != expected:",
         "    raise RuntimeError(f'RFpeptides hotspot indexing preflight failed: observed={observed}, expected={expected}')",
-        "print('[RFpeptides preflight] hotspot indices include the binder-length offset: PASS')",
+        "print(f'[RFpeptides preflight] runtime={runtime_root}')",
+        "print(f'[RFpeptides preflight] commit={observed_commit}')",
+        "print('[RFpeptides preflight] module identity, hashes, and hotspot binder-length offset: PASS')",
         "PY",
         "",
         "mkdir -p " + " ".join(_quote_bash(_to_wsl_path(row["output_dir"])) for row in job_rows),
@@ -234,6 +308,8 @@ Run script:
 
 Important:
 
+- The runner pins one RFpeptides runtime root, Git commit, and four source-file
+  hashes. It aborts if preflight and inference would import different code.
 - This is a small pilot in design count, not a reduced-constraint run.
 - The command keeps the RFpeptides binder requirements: target PDB, target
   contig, cyclic generation, cyclic chain, diffuser timesteps, and hotspot
@@ -249,7 +325,7 @@ def main() -> int:
     parser.add_argument("--output-root", default="results/rfpeptides_article_route_clean_20260612")
     parser.add_argument("--selected-sites", default="RFpep_Site_2")
     parser.add_argument("--stage0-summary-csv", default="")
-    parser.add_argument("--rfpeptides-root", default="C:/SH/peptide_str/rfd_macro")
+    parser.add_argument("--rfpeptides-root", default="/home/luomi/fga_model_envs/rfpeptides/RFdiffusion")
     parser.add_argument("--num-designs", type=int, default=10)
     parser.add_argument("--length-min", type=int, default=12)
     parser.add_argument("--length-max", type=int, default=18)
@@ -283,6 +359,17 @@ def main() -> int:
     rfpeptides_root = resolve_path(args.rfpeptides_root)
     if not (rfpeptides_root / "scripts" / "run_inference.py").exists():
         raise RuntimeError(f"Missing RFpeptides run_inference.py under --rfpeptides-root: {rfpeptides_root}")
+    runtime_files = {
+        "inference_utils": rfpeptides_root / "rfdiffusion" / "inference" / "utils.py",
+        "model_runners": rfpeptides_root / "rfdiffusion" / "inference" / "model_runners.py",
+        "run_inference": rfpeptides_root / "scripts" / "run_inference.py",
+        "util": rfpeptides_root / "rfdiffusion" / "util.py",
+    }
+    missing_runtime_files = [str(path) for path in runtime_files.values() if not path.exists()]
+    if missing_runtime_files:
+        raise RuntimeError(f"Missing RFpeptides runtime files: {missing_runtime_files}")
+    runtime_git_commit = _git_head(rfpeptides_root)
+    runtime_hashes = {key: _sha256(path) for key, path in runtime_files.items()}
 
     stage0_summary_csv = (
         resolve_path(args.stage0_summary_csv)
@@ -354,6 +441,11 @@ def main() -> int:
                 "stage0_mapping_csv": row.get("crop_renumbering_mapping_csv", ""),
                 "stage0_hotspots_txt": row.get("hotspots_txt", ""),
                 "rfpeptides_root": rfpeptides_root,
+                "runtime_git_commit": runtime_git_commit,
+                "runtime_inference_utils_sha256": runtime_hashes["inference_utils"],
+                "runtime_model_runners_sha256": runtime_hashes["model_runners"],
+                "runtime_run_inference_sha256": runtime_hashes["run_inference"],
+                "runtime_util_sha256": runtime_hashes["util"],
                 "working_directory": rfpeptides_root,
                 "output_prefix": output_prefix,
                 "output_dir": output_dir,
@@ -384,6 +476,8 @@ def main() -> int:
         conda_setup=args.conda_setup,
         conda_env=args.conda_env,
         rfpeptides_root=rfpeptides_root,
+        runtime_git_commit=runtime_git_commit,
+        runtime_hashes=runtime_hashes,
     )
     _write_text_lf(run_script, run_script_text)
     write_csv(jobs_dir / "FGA_rfpeptides_stage1_jobs.csv", job_rows, JOB_FIELDS)
