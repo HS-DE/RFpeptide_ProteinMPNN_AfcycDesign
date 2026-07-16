@@ -1,0 +1,6 @@
+2026-07-16 15:17:32,377 [INFO] 脚本: 21_collect_rfpeptides_backbones.py
+2026-07-16 15:17:32,377 [INFO] 运行时间: 2026-07-16T15:17:32
+2026-07-16 15:17:32,380 [INFO] 项目目录: /mnt/c/SH/fga_cyclic_peptide_design
+2026-07-16 15:17:32,688 [INFO] Parsed Stage 1 backbones: 1
+2026-07-16 15:17:32,688 [INFO] Passed Stage 2 backbone QC: 0
+2026-07-16 15:17:32,688 [INFO] Output directory: /mnt/c/SH/fga_cyclic_peptide_design/results/rfpeptides_article_route_clean_20260716_runtimefix_smoke_N1_v3/03_backbone_qc

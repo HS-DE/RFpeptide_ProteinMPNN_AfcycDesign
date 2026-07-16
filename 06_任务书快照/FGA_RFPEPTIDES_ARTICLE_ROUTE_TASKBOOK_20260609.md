@@ -674,7 +674,7 @@ conda activate fga_stage1_fpocket
 python scripts/20_make_rfpeptides_article_jobs.py \
   --input-root results/rfpeptides_article_route_clean_20260615_fpocket \
   --output-root results/rfpeptides_article_route_clean_20260615_fpocket \
-  --rfpeptides-root /mnt/c/SH/peptide_str/rfd_macro \
+  --rfpeptides-root /home/luomi/fga_model_envs/rfpeptides/RFdiffusion \
   --selected-sites RFpep_Site_2 \
   --num-designs 10 \
   --length-min 12 \
@@ -704,7 +704,7 @@ conda activate fga_stage1_fpocket
 python scripts/20_make_rfpeptides_article_jobs.py \
   --input-root results/rfpeptides_article_route_clean_20260615_fpocket \
   --output-root results/rfpeptides_article_route_clean_20260615_fpocket_stage1_N1000_no_traj \
-  --rfpeptides-root /mnt/c/SH/peptide_str/rfd_macro \
+  --rfpeptides-root /home/luomi/fga_model_envs/rfpeptides/RFdiffusion \
   --selected-sites RFpep_Site_2 \
   --num-designs 1000 \
   --length-min 12 \
@@ -2133,59 +2133,111 @@ of five correctly targeted Site_2 candidates.
 Corrected files:
 
 ```text
-rfd_macro/rfdiffusion/inference/utils.py
-rfd_macro/rfdiffusion/inference/model_runners.py
+/home/luomi/fga_model_envs/rfpeptides/RFdiffusion/rfdiffusion/inference/utils.py
+/home/luomi/fga_model_envs/rfpeptides/RFdiffusion/rfdiffusion/inference/model_runners.py
+/home/luomi/fga_model_envs/rfpeptides/RFdiffusion/scripts/run_inference.py
 scripts/20_make_rfpeptides_article_jobs.py
 scripts/21_collect_rfpeptides_backbones.py
 scripts/23_collect_proteinmpnn_sequences.py
 scripts/31_collect_stage5b_validation.py
 ```
 
-The RFpeptides runner now aborts unless a static preflight proves that hotspot
-indices include the binder-length offset. Stage 2 maps crop positions through
-target-chain residue order and records the actual PDB residue numbers per row.
-Stage 3C/3D-1/4 inherit the corrected mapping, including object-specific PyMOL
-selections.
+Critical runtime correction (2026-07-16): the old runner used two different
+RFdiffusion checkouts. Its `python -` preflight imported
+`C:/SH/peptide_str/rfd_macro`, while `scripts/run_inference.py` imported the
+installed package under `/home/luomi/fga_model_envs/rfpeptides/RFdiffusion`.
+The preflight therefore checked code that inference did not execute. The home
+runtime still lacked the binder-length hotspot offset, so the old N20 smoke was
+also invalid.
+
+The Stage 1 runner now pins one runtime root, Git commit, and SHA-256 values for
+`inference/utils.py`, `model_runners.py`, `util.py`, and `run_inference.py`.
+Inference writes a per-design `runtime_audit.json` and the same audit into TRB.
+Stage 2 requires this provenance, identifies target by exact Stage 0 sequence,
+and checks hotspot indices, output chain order, and peptide-only cyclic mask
+before any contact result can pass.
 
 The old batch01/batch02 Stage 2-5 results must be retained as legacy/off-target
 protocol-exploration outputs and must not be used for final ranking. They may be
 re-screened for accidental correct-site contacts, but they were not generated
 with correct intended-hotspot conditioning.
 
-A new 20-design, no-trajectory smoke job is prepared but not run:
+A new one-design, no-trajectory runtime-locked smoke was generated and checked:
 
 ```text
-results/rfpeptides_article_route_clean_20260715_hotspotfix_smoke/
-  01_rfpeptides_jobs/run_rfpeptides_stage1_site2_hotspotfix_smoke_N20.sh
+results/rfpeptides_article_route_clean_20260716_runtimefix_smoke_N1_v2/
+  01_rfpeptides_jobs/run_rfpeptides_stage1_site2_runtimefix_smoke_N1_v2.sh
+  02_rfpeptides_backbones/RFpep_Site_2/
+    RFpep_Site_2_L17_17_0.pdb
+    RFpep_Site_2_L17_17_0.trb
+    RFpep_Site_2_L17_17_0.runtime_audit.json
+  03_backbone_qc_runtimefix_strict/
 ```
 
-Run it manually:
+Verified N1 runtime evidence:
 
-```bash
-cd /mnt/c/SH/fga_cyclic_peptide_design
-
-bash \
-  results/rfpeptides_article_route_clean_20260715_hotspotfix_smoke/01_rfpeptides_jobs/run_rfpeptides_stage1_site2_hotspotfix_smoke_N20.sh
+```text
+runtime_root: /home/luomi/fga_model_envs/rfpeptides/RFdiffusion
+target_chain: A (86 aa, exact Stage 0 sequence)
+peptide_chain: B (17 aa)
+runtime_hotspot_0idx: 98,100,101,102
+expected_hotspot_0idx: 98,100,101,102
+cyclic_indices: peptide only
+direct_site_contacts: 5
+direct_hotspot_contacts: 4
+terminal_C_N_distance_A: 1.146
+severe_clash: false
+strict_stage2_pass: true
 ```
 
-Then run corrected Stage 2 QC into a versioned subdirectory, preserving old
-results:
+This is an engineering N1 smoke, not a production candidate and not enough to
+restart ProteinMPNN or Stage 5. A reviewed small batch is still required first.
 
-```bash
-cd /mnt/c/SH/fga_cyclic_peptide_design
-source ~/fga_model_envs/miniforge3/etc/profile.d/conda.sh
-conda activate fga_stage1_fpocket
+### Stage 1 to Stage 2 end-to-end hotspot provenance closure (N1-v3, 2026-07-16)
 
-python scripts/21_collect_rfpeptides_backbones.py \
-  --stage0-root results/rfpeptides_article_route_clean_20260615_fpocket \
-  --stage1-root results/rfpeptides_article_route_clean_20260715_hotspotfix_smoke \
-  --output-subdir 03_backbone_qc_hotspot_mapping_v2 \
-  --selected-sites RFpep_Site_2
+The N1-v2 checks did not yet force Stage 2 to read the real TRB mapping when a
+runtime-audit JSON existed. N1-v3 closes that remaining gap.
+
+Stage 1 now locks the SHA-256 identity of the Stage 0 target PDB, crop mapping
+CSV, and normalized hotspot list. Its preflight constructs a real ContigMap
+from those inputs and the real contig. During `_preprocess()`, inference
+independently derives hotspot indices from ContigMap, compares them with
+`get_idx0_hotspots()`, creates the real model hotspot tensor, reads its nonzero
+positions with `torch.where`, and hard-fails on any disagreement.
+
+The final runtime audit is written only after the model tensor exists. The JSON
+and TRB copies must be exactly identical. Stage 2 always reads both files and
+verifies the complete mapping:
+
+```text
+Stage 0 residue -> TRB complex-global index -> model tensor index
+                -> writer chain/number -> output PDB chain/number
 ```
 
-Do not restart ProteinMPNN or Stage 5 until the smoke TRB confirms that input
-crop hotspots map to the correct complex-global target positions and corrected
-Stage 2 finds genuine Site_2/hotspot contacts.
+New smoke root:
+
+```text
+results/rfpeptides_article_route_clean_20260716_runtimefix_smoke_N1_v3/
+```
+
+Verified provenance result:
+
+```text
+Stage 0 target/mapping/hotspot hashes: pass
+JSON audit == TRB runtime_audit: pass
+TRB mapping == Stage 0 mapping: pass
+helper hotspot indices: 98,100,101,102
+ContigMap-derived indices: 98,100,101,102
+actual model tensor indices: 98,100,101,102
+runtime chain_idx == PDB chain order: pass
+runtime idx_pdb == PDB residue numbering: pass
+per-hotspot Stage0/TRB/tensor/PDB crosswalk: pass
+```
+
+The sampled N1-v3 backbone itself was detached and missed Site_2/hotspots, so
+`pass_backbone_qc=false`. This is a structural-design failure, not a provenance
+failure, and the structure must not enter Stage 3. No replacement sample was
+silently selected.
 
 ### Pre-hotspot-fix output quarantine (2026-07-16)
 
@@ -2207,11 +2259,11 @@ deleted and no second multi-GiB copy was created. Every entry was checked
 against its pre-move file count and byte count:
 
 ```text
-archived_entries: 13
-archived_files: 99,147
-archived_bytes: 3,812,075,662
+archived_entries: 14
+archived_files: 99,199
+archived_bytes: 3,813,640,162
 archived_size_GiB: 3.55
-inventory_status: moved_verified for 13/13 entries
+inventory_status: moved_verified for 14/14 entries
 ```
 
 The quarantine contains:
@@ -2226,6 +2278,7 @@ The quarantine contains:
 20260623_stage5_batch01_batch02
 20260623_stage5A_v2_batch01_batch02
 20260623_stage5B_batch01_batch02
+20260715_hotspotfix_smoke_false_preflight
 ```
 
 The following remain outside quarantine because they do not depend on the old
@@ -2235,37 +2288,34 @@ peptide hotspot pose premise or are part of the corrected route:
 20260612/00_site_discovery and 00_target_inputs
 20260615_fpocket/00_site_discovery and 00_target_inputs
 20260623_stage5_target_controls_v1
-20260715_hotspotfix_smoke
+20260716_runtimefix_smoke_N1_v2
 ```
 
-The corrected N20 smoke produced 20 backbones. Its first versioned Stage 2 QC
-table contained six pass rows, but three had zero direct hotspot contacts and
-passed only through the old `hotspot_near_pass` allowance. Stage 2 now rejects
-near-only site/hotspot states by default; `--allow-near-pass` exists only as an
-explicit compatibility option. The strict rerun was written to:
+The old N20 smoke is not corrected. Its static preflight imported a different
+checkout from the package used by inference. Although its output PDB files were
+parsed as target chain A and peptide chain B, inference still used receptor-
+local hotspot indices without the binder offset. Its previous `3/20 strict
+pass` labels are accidental post-hoc contacts and are not evidence of correctly
+conditioned generation. The entire N20 root was moved to:
 
 ```text
-results/rfpeptides_article_route_clean_20260715_hotspotfix_smoke/
-  03_backbone_qc_hotspot_mapping_v3_strict/
+results/_archived_invalid_site2_hotspot_mapping_20260716/affected_results/
+  rfpeptides_article_route_clean_20260715_hotspotfix_smoke_false_preflight/
 ```
 
-Strict result:
+Invalidated old labels:
 
 ```text
 parsed_backbones: 20
-strict_pass: 3
-strict_pass_ids: RFpep_Site_2_0002, RFpep_Site_2_0017, RFpep_Site_2_0018
-direct_hotspot_contacts: 2, 1, 1 respectively
-severe_clash: none for all 3
-macrocycle_geometry: pass for all 3
+previous_strict_pass: 3
+usable_after_runtime_audit: 0
+reason: false preflight; actual inference package remained unfixed
 ```
 
-These three remain smoke candidates pending manual structure review; they are
-not production candidates and do not yet justify a large rerun.
-
-The active restart boundary remains corrected Stage 1 followed by strict Stage
-2. No quarantined Stage 3, Stage 4, Stage 5A, or Stage 5B output may be restored
-to candidate ranking.
+The active restart boundary is the runtime-locked Stage 1 implementation and
+the N1-v2 provenance test above, followed by a new reviewed small batch and
+strict Stage 2. No quarantined Stage 1-5 output may be restored to candidate
+ranking.
 
 ## 14. Stage 6: Final Ranking
 
@@ -2400,35 +2450,39 @@ Current state:
 Stage -1 site discovery: retained
 Stage 0 target crop and mapping: retained
 pre-hotspot-fix Stage 1-5 outputs: quarantined
-corrected Stage 1 N20 smoke: completed
-strict Stage 2 direct-contact QC: 3/20 pass
-ProteinMPNN / Stage 4 / Stage 5 restart: blocked pending manual review
+false-preflight Stage 1 N20 smoke: quarantined, 0 usable
+runtime-locked Stage 1 N1-v2 smoke: completed
+strict Stage 2 provenance/contact QC: 1/1 engineering pass
+ProteinMPNN / Stage 4 / Stage 5 restart: blocked pending new small-batch review
 ```
 
-The three strict smoke pass IDs are:
+The only currently verified smoke ID is:
 
 ```text
-RFpep_Site_2_0002
-RFpep_Site_2_0017
-RFpep_Site_2_0018
+RFpep_Site_2_0000 (N1-v2 engineering smoke only)
 ```
 
 Review script:
 
 ```text
-results/rfpeptides_article_route_clean_20260715_hotspotfix_smoke/
-  03_backbone_qc_hotspot_mapping_v3_strict/
+results/rfpeptides_article_route_clean_20260716_runtimefix_smoke_N1_v2/
+  03_backbone_qc_runtimefix_strict/
   RFpep_Site_2_stage2_top_pass_review.pml
 ```
 
 Before any larger generation run:
 
-1. Confirm the runner's static hotspot-offset preflight passes.
-2. Inspect at least one TRB mapping from each peptide length represented.
-3. Confirm mapped hotspot PDB residue numbers equal `peptide_length + crop_position`.
-4. Open all three strict pass structures in PyMOL and verify genuine Site_2 and
-   hotspot contacts rather than contact with another crop surface.
-5. Record manual accept/reject decisions before selecting a new small scale.
+1. Confirm the runner reports the single pinned home runtime path, commit and
+   source hashes.
+2. Inspect `runtime_audit.json` for every small-batch design.
+3. Confirm model-tensor hotspot indices equal
+   `peptide_length + crop_position - 1`; output PDB numbering may remain the
+   target's original `A1-A86` because the canonical home entrypoint supplies
+   `idx_pdb` to the writer.
+4. Confirm target sequence identity, peptide-only cyclic indices and output
+   chain order all pass Stage 2 provenance gates.
+5. Open strict-pass structures in PyMOL and record manual accept/reject before
+   any production scale.
 
 Do not restart ProteinMPNN, Rosetta scoring, or Stage 5 until this manual review
 is complete. The next scale must remain small enough to audit before any

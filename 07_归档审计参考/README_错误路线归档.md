@@ -43,9 +43,9 @@ Stage 5B 结果解释为对 5 个正确 Site_2 候选的验证或否定。
 归档前盘点：
 
 ```text
-affected_entries: 13 directories/subdirectories
-files: 99,147
-size: 3,812,075,662 bytes (about 3.55 GiB)
+affected_entries: 14 directories/subdirectories
+files: 99,199
+size: 3,813,640,162 bytes (about 3.55 GiB)
 ```
 
 `archive_manifest.csv` 记录每个条目的原始路径、归档路径、文件数和字节数。
@@ -67,6 +67,7 @@ rfpeptides_article_route_clean_20260623_stage1_N10000_L12_24_batch05
 rfpeptides_article_route_clean_20260623_stage5_batch01_batch02
 rfpeptides_article_route_clean_20260623_stage5A_v2_batch01_batch02
 rfpeptides_article_route_clean_20260623_stage5B_batch01_batch02
+rfpeptides_article_route_clean_20260715_hotspotfix_smoke_false_preflight
 ```
 
 ## 明确保留在活动结果区的内容
@@ -77,11 +78,18 @@ results/rfpeptides_article_route_clean_20260612/00_target_inputs
 results/rfpeptides_article_route_clean_20260615_fpocket/00_site_discovery
 results/rfpeptides_article_route_clean_20260615_fpocket/00_target_inputs
 results/rfpeptides_article_route_clean_20260623_stage5_target_controls_v1
-results/rfpeptides_article_route_clean_20260715_hotspotfix_smoke
+results/rfpeptides_article_route_clean_20260716_runtimefix_smoke_N1_v2
 ```
 
-其中 target-only controls 不依赖旧 peptide reference pose，可作为协议诊断记录；
-`20260715_hotspotfix_smoke` 使用修复后的 hotspot indexing，不能与本归档混合。
+其中 target-only controls 不依赖旧 peptide reference pose，可作为协议诊断记录。
+
+2026-07-16 复核发现，旧 `20260715_hotspotfix_smoke` 的静态 preflight 从
+`C:/SH/peptide_str/rfd_macro` 导入了已修改 helper，但实际 inference 从
+`/home/luomi/fga_model_envs/rfpeptides/RFdiffusion` 导入了另一份未修复 package。
+因此它是 false-preflight 结果，20 条 backbone 和 3 条 strict-pass 记录全部
+转入本归档，不得作为修复后 smoke。新的 `20260716_runtimefix_smoke_N1_v2`
+强制锁定单一 runtime root，并在 TRB/JSON 中记录源码路径、哈希、hotspot index、
+chain identity 和 cyclic mask。
 
 ## 重新开始边界
 
@@ -94,4 +102,3 @@ results/rfpeptides_article_route_clean_20260715_hotspotfix_smoke
 5. 修正版 Stage 2 必须证明 peptide 接触正确 Site_2/hotspot。
 
 上述检查未全部通过前，不得进入 ProteinMPNN、Rosetta Stage 4 或 Stage 5。
-
