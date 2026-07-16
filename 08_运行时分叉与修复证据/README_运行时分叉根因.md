@@ -66,3 +66,14 @@ strict Stage 2: pass
 runtime audit 是否彼此一致。
 
 这只是工程 N1 smoke，不是生产候选，也不足以直接恢复 ProteinMPNN 或 Stage 5。
+
+## 后续 N1-v3 闭环
+
+N1-v2 之后发现静态 preflight 和 Stage 2 尚未自动读取真实 TRB mapping。该缺口
+已在 `../09_Stage1到Stage2端到端闭环证据_N1_v3/` 中继续修复：模型输入 tensor
+位置被直接读取并硬断言，最终 JSON/TRB audit 必须完全一致，Stage 2 逐热点验证
+`Stage 0 -> TRB global index -> tensor -> writer -> PDB`。
+
+N1-v3 的 provenance closure 通过，但随机结构的 contact QC 失败，因此不能进入
+Stage 3。请勿用 N1-v2 的结构 pass 代替 N1-v3 的 provenance 证据，也不要用
+N1-v3 的 provenance pass 宣称该 backbone 设计成功。

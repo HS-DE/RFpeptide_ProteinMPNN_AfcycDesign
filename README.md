@@ -11,6 +11,7 @@
 | --- | --- |
 | `CURRENT_REVIEW_SNAPSHOT` | 当前修复后源码快照，仍需人工检查 |
 | `CURRENT_CORRECTED_SMOKE_REFERENCE` | runtime-locked N1-v2 runner 样例 |
+| `CURRENT_END_TO_END_PROVENANCE_EVIDENCE` | N1-v3 Stage 0/ContigMap/tensor/TRB/PDB 端到端闭环证据 |
 | `ACTUAL_RUNTIME_SNAPSHOT` | 实际被推理进程加载的 home RFdiffusion 源码 |
 | `NON_RUNTIME_REFERENCE` | 可见但未被旧 N20 inference 导入的本地参考副本 |
 | `ARCHIVED_INVALID_DO_NOT_RUN` | 从错误路线归档复制，只能审计，禁止执行 |
@@ -28,6 +29,7 @@
 06_任务书快照/            当前任务书副本
 07_归档审计参考/          根因说明、禁止使用标记和移动清单
 08_运行时分叉与修复证据/   false-preflight 根因、新 runtime audit 和严格 Stage 2 证据
+09_Stage1到Stage2端到端闭环证据_N1_v3/ 完整 N1-v3 产物、mapping export、QC 和日志
 脚本逐项清单.csv           每一个复制文件的来源、用途、状态和 SHA-256
 SHA256SUMS.csv             副本完整性校验表
 ```
@@ -159,3 +161,18 @@ peptide chain B = 17 aa and cyclic mask covers peptide only
 和严格 Stage 2 QC 表逐项交叉核验。
 
 这条只证明修复后的工程链路可以闭环，不能据此直接扩大生产。
+
+## N1-v3 端到端 provenance closure
+
+`09_Stage1到Stage2端到端闭环证据_N1_v3/` 保存了新的独立 smoke。该版本在
+N1-v2 基础上补齐：
+
+- Stage 0 target PDB、mapping CSV、规范化 hotspot list 的 SHA256 锁定；
+- 真实 Stage 0 PDB/contig/hotspots 构造的 ContigMap preflight；
+- helper、独立 ContigMap 推导和实际 model hotspot tensor 的运行时硬断言；
+- model tensor 建立后才最终写出的 JSON/TRB identical runtime audit；
+- Stage 2 对 JSON、TRB mapping、writer chain/numbering 和真实 PDB 的逐热点闭环。
+
+N1-v3 的 provenance 全部通过，但随机 backbone 没有接触 target/Site_2/hotspot，
+所以 `pass_backbone_qc=false`，不得进入 Stage 3。这一区分是预期行为：
+provenance pass 只证明生成条件与输出身份可追溯，不代表结构设计质量通过。

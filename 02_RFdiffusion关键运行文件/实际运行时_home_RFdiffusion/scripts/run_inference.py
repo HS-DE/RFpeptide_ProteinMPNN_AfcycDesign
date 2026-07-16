@@ -49,6 +49,30 @@ def sha256_file(path):
     return digest.hexdigest()
 
 
+def sha256_text(value):
+    return hashlib.sha256(value.encode("utf-8")).hexdigest()
+
+
+def canonical_hotspots(values):
+    parsed = []
+    for value in values or []:
+        text = str(value).strip()
+        match = re.fullmatch(r"([A-Za-z])(\-?\d+)", text)
+        if match is None:
+            raise RuntimeError(f"Invalid hotspot residue label: {value}")
+        parsed.append((match.group(1), int(match.group(2))))
+    if len(set(parsed)) != len(parsed):
+        raise RuntimeError(f"Duplicate hotspot residue labels are not allowed: {values}")
+    return ",".join(f"{chain}{number}" for chain, number in sorted(parsed))
+
+
+def required_environment(name):
+    value = os.environ.get(name, "").strip()
+    if not value:
+        raise RuntimeError(f"Required Stage 1 provenance environment variable is missing: {name}")
+    return value
+
+
 @hydra.main(version_base=None, config_path="../config/inference", config_name="base")
 def main(conf: HydraConfig) -> None:
     log = logging.getLogger(__name__)
@@ -66,6 +90,44 @@ def main(conf: HydraConfig) -> None:
 
     # Initialize sampler and target/contig.
     sampler = iu.sampler_selector(conf)
+
+    provenance_required = os.environ.get("RFPEPTIDES_REQUIRE_PROVENANCE_CLOSURE", "") == "1"
+    input_pdb_path = Path(sampler.inf_conf.input_pdb).resolve()
+    input_pdb_sha256 = sha256_file(input_pdb_path)
+    configured_hotspots_normalized = canonical_hotspots(sampler.ppi_conf.hotspot_res or [])
+    configured_hotspots_sha256 = sha256_text(configured_hotspots_normalized)
+    stage0_mapping_csv = os.environ.get("STAGE0_MAPPING_CSV", "").strip()
+    stage0_mapping_csv_sha256 = ""
+    if stage0_mapping_csv:
+        stage0_mapping_csv = str(Path(stage0_mapping_csv).resolve())
+        stage0_mapping_csv_sha256 = sha256_file(stage0_mapping_csv)
+
+    if provenance_required:
+        expected_target_sha256 = required_environment("STAGE0_TARGET_PDB_SHA256")
+        expected_mapping_sha256 = required_environment("STAGE0_MAPPING_CSV_SHA256")
+        expected_hotspots_sha256 = required_environment("STAGE0_HOTSPOTS_SHA256")
+        expected_hotspots_normalized = required_environment("STAGE0_HOTSPOTS_NORMALIZED")
+        required_environment("STAGE0_MAPPING_CSV")
+        if input_pdb_sha256 != expected_target_sha256:
+            raise RuntimeError(
+                "Stage 0 target PDB hash changed before inference: "
+                f"observed={input_pdb_sha256} expected={expected_target_sha256}"
+            )
+        if stage0_mapping_csv_sha256 != expected_mapping_sha256:
+            raise RuntimeError(
+                "Stage 0 mapping CSV hash changed before inference: "
+                f"observed={stage0_mapping_csv_sha256} expected={expected_mapping_sha256}"
+            )
+        if configured_hotspots_normalized != expected_hotspots_normalized:
+            raise RuntimeError(
+                "Configured hotspots differ from the locked normalized Stage 0 list: "
+                f"configured={configured_hotspots_normalized} expected={expected_hotspots_normalized}"
+            )
+        if configured_hotspots_sha256 != expected_hotspots_sha256:
+            raise RuntimeError(
+                "Configured hotspot hash differs from the locked Stage 0 hash: "
+                f"observed={configured_hotspots_sha256} expected={expected_hotspots_sha256}"
+            )
 
     # Loop over number of designs to sample.
     design_startnum = sampler.inf_conf.design_startnum
@@ -118,31 +180,27 @@ def main(conf: HydraConfig) -> None:
             },
             "binderlen": int(sampler.binderlen),
             "hotspot_0idx": [int(value) for value in (sampler.hotspot_0idx or [])],
+            "contigmap_derived_hotspot_0idx": [],
+            "model_hotspot_tensor_0idx": [],
             "chain_idx": [str(value) for value in sampler.chain_idx],
             "idx_pdb": [int(value) for value in sampler.idx_pdb],
             "cyclic_residue_indices": [
                 int(value)
                 for value in torch.where(sampler.cyclic_reses)[0].detach().cpu().tolist()
             ],
-            "input_pdb": str(Path(sampler.inf_conf.input_pdb).resolve()),
+            "input_pdb": str(input_pdb_path),
+            "input_pdb_sha256": input_pdb_sha256,
+            "stage0_target_pdb_sha256": input_pdb_sha256,
+            "stage0_mapping_csv": stage0_mapping_csv,
+            "stage0_mapping_csv_sha256": stage0_mapping_csv_sha256,
+            "stage0_hotspots_normalized": configured_hotspots_normalized,
+            "stage0_hotspots_sha256": configured_hotspots_sha256,
+            "provenance_closure_required": provenance_required,
             "requested_hotspots": [str(value) for value in (sampler.ppi_conf.hotspot_res or [])],
             "contigs": [str(value) for value in (sampler.contig_conf.contigs or [])],
             "cyclic": bool(sampler.inf_conf.cyclic),
             "cyc_chains": str(sampler.inf_conf.cyc_chains),
         }
-        with open(f"{out_prefix}.runtime_audit.json", "w", encoding="utf-8") as audit_handle:
-            json.dump(runtime_audit, audit_handle, indent=2, sort_keys=True)
-            audit_handle.write("\n")
-        log.info(
-            "Runtime audit: utils=%s binderlen=%s hotspot_0idx=%s chain_counts=%s",
-            runtime_audit["rfdiffusion_inference_utils"],
-            runtime_audit["binderlen"],
-            runtime_audit["hotspot_0idx"],
-            {
-                chain: runtime_audit["chain_idx"].count(chain)
-                for chain in sorted(set(runtime_audit["chain_idx"]))
-            },
-        )
         denoised_xyz_stack = []
         px0_xyz_stack = []
         seq_stack = []
@@ -159,6 +217,27 @@ def main(conf: HydraConfig) -> None:
             denoised_xyz_stack.append(x_t)
             seq_stack.append(seq_t)
             plddt_stack.append(plddt[0])  # remove singleton leading dimension
+
+        runtime_audit["contigmap_derived_hotspot_0idx"] = [
+            int(value) for value in sampler.contigmap_derived_hotspot_0idx
+        ]
+        runtime_audit["model_hotspot_tensor_0idx"] = [
+            int(value) for value in sampler.model_hotspot_tensor_0idx
+        ]
+        expected_runtime_hotspots = sorted(runtime_audit["hotspot_0idx"])
+        if runtime_audit["contigmap_derived_hotspot_0idx"] != expected_runtime_hotspots:
+            raise RuntimeError(
+                "Final ContigMap hotspot audit disagrees with helper mapping: "
+                f"contigmap={runtime_audit['contigmap_derived_hotspot_0idx']} "
+                f"helper={expected_runtime_hotspots}"
+            )
+        if runtime_audit["model_hotspot_tensor_0idx"] != expected_runtime_hotspots:
+            raise RuntimeError(
+                "Final model hotspot tensor audit disagrees with helper mapping: "
+                f"tensor={runtime_audit['model_hotspot_tensor_0idx']} "
+                f"helper={expected_runtime_hotspots}"
+            )
+        runtime_audit["runtime_audit_finalized_after_model_hotspot_tensor"] = True
 
         # Flip order for better visualization in pymol
         denoised_xyz_stack = torch.stack(denoised_xyz_stack)
@@ -218,8 +297,31 @@ def main(conf: HydraConfig) -> None:
         if hasattr(sampler, "contig_map"):
             for key, value in sampler.contig_map.get_mappings().items():
                 trb[key] = value
+        audit_json_path = f"{out_prefix}.runtime_audit.json"
+        with open(audit_json_path, "w", encoding="utf-8") as audit_handle:
+            json.dump(runtime_audit, audit_handle, indent=2, sort_keys=True)
+            audit_handle.write("\n")
         with open(f"{out_prefix}.trb", "wb") as f_out:
             pickle.dump(trb, f_out)
+        with open(audit_json_path, "r", encoding="utf-8") as audit_handle:
+            json_audit_roundtrip = json.load(audit_handle)
+        with open(f"{out_prefix}.trb", "rb") as f_in:
+            trb_audit_roundtrip = pickle.load(f_in).get("runtime_audit")
+        if json_audit_roundtrip != trb_audit_roundtrip:
+            raise RuntimeError(
+                "Final runtime audit JSON and TRB runtime_audit differ; output provenance is invalid."
+            )
+        log.info(
+            "Final runtime audit: binderlen=%s helper=%s contigmap=%s tensor=%s chain_counts=%s",
+            runtime_audit["binderlen"],
+            runtime_audit["hotspot_0idx"],
+            runtime_audit["contigmap_derived_hotspot_0idx"],
+            runtime_audit["model_hotspot_tensor_0idx"],
+            {
+                chain: runtime_audit["chain_idx"].count(chain)
+                for chain in sorted(set(runtime_audit["chain_idx"]))
+            },
+        )
 
         if sampler.inf_conf.write_trajectory:
             # trajectory pdbs
