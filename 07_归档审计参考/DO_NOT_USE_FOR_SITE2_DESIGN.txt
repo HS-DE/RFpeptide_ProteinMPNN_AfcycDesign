@@ -1,0 +1,7 @@
+ARCHIVE STATUS: INVALID FOR INTENDED RFpep_Site_2 DESIGN
+
+These pre-fix Stage 1-5 outputs used or inherited an incorrect hotspot index
+mapping. Keep them only for traceability and protocol debugging. Do not use
+them for candidate ranking, downstream validation, or final peptide claims.
+
+See README_错误路线归档.md and archive_manifest.csv.
