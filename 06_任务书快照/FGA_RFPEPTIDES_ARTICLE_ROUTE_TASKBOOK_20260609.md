@@ -6,6 +6,42 @@ Status: draft for discussion. This document records a proposed RFpeptides branch
 that follows the logic of the RFpeptides macrocycle design paper. It is not yet
 an approved execution SOP.
 
+## 2026-07-17 Active Stage 20-31 Contract
+
+Stage 20-31 production execution now uses the strict head-to-tail configuration:
+
+```text
+config/rfpeptides_head_to_tail.yaml
+```
+
+The review-package copy is stored at:
+
+```text
+05_配置快照/config/rfpeptides_head_to_tail.yaml
+```
+
+The following rules override older dated command examples later in this
+historical taskbook:
+
+- Every Stage 20-31 command must explicitly provide `--project-config`.
+- Stage 20 must explicitly provide `--input-root`, `--output-root`,
+  `--selected-sites`, `--rfpeptides-root`, and `--batch-id`.
+- Stage 21-25 must explicitly provide their upstream run roots and selected
+  site/backbone IDs.
+- Stage 26 accepts one or more repeatable `--source-run-root` arguments; it no
+  longer assumes fixed batch names.
+- Stage 27-31 must explicitly provide their Stage 5/control roots.
+- Every new Stage 20 run writes `route_manifest.json`; Stage 21-31 require and
+  verify that manifest and propagate its provenance.
+- `config/project.yaml` remains a Stage 00-19 compatibility config and is not
+  valid for Stage 20-31. The archived disulfide config is also rejected.
+- Historical command blocks containing dated roots, `N1000`, a fixed backbone,
+  or fixed batch names document prior runs only and must not be copied as a new
+  production command.
+
+No RFpeptides, ProteinMPNN, PyRosetta, or AfCycDesign model run was performed
+as part of this P1 code/configuration repair.
+
 Clean-restart decision:
 
 This RFpeptides article-style branch should be treated as a clean route. Do not
