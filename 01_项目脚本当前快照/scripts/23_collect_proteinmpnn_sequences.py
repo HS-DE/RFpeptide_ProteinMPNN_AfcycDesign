@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import argparse
+import hashlib
 import math
 import os
 from collections import Counter
@@ -13,11 +14,15 @@ from pdb_utils import ca_coord, centroid, distance, parse_residues, residue_sequ
 
 STAGE3C_FIELDS = [
     "sequence_design_id",
+    "stage3_job_id",
+    "run_group_id",
+    "protocol_identity_sha256",
     "backbone_id",
     "site_label",
     "site_id",
     "relaxed_pdb",
     "source_backbone_pdb",
+    "source_backbone_pdb_sha256",
     "file_status",
     "parse_status",
     "target_chain",
@@ -134,15 +139,83 @@ def _read_required_csv(path: Path) -> list[dict[str, str]]:
     return rows
 
 
-def _lookup_rows(rows: Iterable[Mapping[str, str]], keys: Sequence[str]) -> dict[str, dict[str, str]]:
+def _sha256_file(path: Path) -> str:
+    digest = hashlib.sha256()
+    with path.open("rb") as handle:
+        for block in iter(lambda: handle.read(1024 * 1024), b""):
+            digest.update(block)
+    return digest.hexdigest()
+
+
+def _strict_lookup_rows(
+    rows: Iterable[Mapping[str, str]],
+    key: str,
+    label: str,
+) -> dict[str, dict[str, str]]:
     lookup: dict[str, dict[str, str]] = {}
     for row in rows:
         item = dict(row)
-        for key in keys:
-            value = item.get(key, "")
-            if value:
-                lookup[value] = item
+        value = str(item.get(key, "")).strip()
+        if not value:
+            raise RuntimeError(f"{label} row is missing {key}")
+        if "," in value:
+            raise RuntimeError(f"{label} row contains aggregate {key}: {value}")
+        if value in lookup:
+            raise RuntimeError(f"Duplicate {label} {key}: {value}")
+        lookup[value] = item
     return lookup
+
+
+def _validate_stage3_job_row(
+    *,
+    backbone_id: str,
+    backbone_row: Mapping[str, str],
+    job_row: Mapping[str, str],
+    expected_stage3_mode: str,
+) -> None:
+    if str(job_row.get("design_id", "")).strip() != backbone_id:
+        raise RuntimeError(f"Stage 3 job design_id does not match selected backbone: {backbone_id}")
+    if str(job_row.get("backbone_id", "")).strip() not in {"", backbone_id}:
+        raise RuntimeError(f"Stage 3 job backbone_id does not match selected backbone: {backbone_id}")
+    if str(job_row.get("stage3_mode", "")).strip() != expected_stage3_mode:
+        raise RuntimeError(
+            f"Stage 3 job mode mismatch for {backbone_id}: expected={expected_stage3_mode}, "
+            f"actual={job_row.get('stage3_mode', '')}"
+        )
+    source_text = str(job_row.get("source_backbone_pdb", "")).strip()
+    source_sha256 = str(job_row.get("source_backbone_pdb_sha256", "")).strip().lower()
+    if not source_text or not source_sha256:
+        raise RuntimeError(f"Stage 3 job is missing source backbone path/hash for {backbone_id}")
+    job_source = _resolve_mixed_path(source_text)
+    stage2_source = _resolve_mixed_path(str(backbone_row.get("rf_pdb", "")))
+    if not job_source.exists() or not stage2_source.exists():
+        raise RuntimeError(f"Stage 3 source backbone PDB is missing for {backbone_id}")
+    if job_source.resolve() != stage2_source.resolve():
+        raise RuntimeError(
+            f"Stage 3 source backbone path mismatch for {backbone_id}: job={job_source}, stage2={stage2_source}"
+        )
+    actual_sha256 = _sha256_file(job_source)
+    if actual_sha256 != source_sha256:
+        raise RuntimeError(
+            f"Stage 3 source backbone SHA-256 mismatch for {backbone_id}: "
+            f"expected={source_sha256}, actual={actual_sha256}"
+        )
+    if not str(job_row.get("stage3_job_id", "")).strip():
+        raise RuntimeError(f"Stage 3 job is missing stage3_job_id for {backbone_id}")
+    if not str(job_row.get("run_group_id", "")).strip():
+        raise RuntimeError(f"Stage 3 job is missing run_group_id for {backbone_id}")
+    if not str(job_row.get("protocol_identity_sha256", "")).strip():
+        raise RuntimeError(f"Stage 3 job is missing protocol identity for {backbone_id}")
+
+
+def _stage3_job_provenance(job_row: Mapping[str, str]) -> dict[str, str]:
+    return {
+        "stage3_job_id": str(job_row.get("stage3_job_id", "")),
+        "run_group_id": str(job_row.get("run_group_id", "")),
+        "protocol_identity_sha256": str(job_row.get("protocol_identity_sha256", "")),
+        "source_backbone_pdb": str(job_row.get("source_backbone_pdb", "")),
+        "source_backbone_pdb_sha256": str(job_row.get("source_backbone_pdb_sha256", "")),
+    }
 
 
 def _residue_label(chain_id: str, residue: Mapping[str, Any]) -> str:
@@ -831,19 +904,18 @@ def _write_pymol_review(
 
 def main() -> int:
     parser = argparse.ArgumentParser(description="Collect and QC Stage 3B ProteinMPNN sequence-design outputs.")
-    parser.add_argument("--stage0-root", default="results/rfpeptides_article_route_clean_20260615_fpocket")
-    parser.add_argument("--stage3-root", default="results/rfpeptides_article_route_clean_20260615_fpocket_stage1_N1000_no_traj")
+    parser.add_argument("--stage0-root", required=True)
+    parser.add_argument("--stage3-root", required=True)
     parser.add_argument("--output-root", default="", help="Defaults to --stage3-root.")
     parser.add_argument(
         "--stage3-mode",
         choices=["proteinmpnn_fastrelax", "proteinmpnn_only"],
-        default="proteinmpnn_fastrelax",
+        default="proteinmpnn_only",
         help="Select mode-specific Stage 3B job/output defaults.",
     )
-    parser.add_argument("--selected-backbones", default="RFpep_Site_2_0007")
+    parser.add_argument("--selected-backbones", required=True)
     parser.add_argument("--stage2-pass-csv", default="")
-    parser.add_argument("--stage3-jobs-csv", default="")
-    parser.add_argument("--input-pdb-dir", default="")
+    parser.add_argument("--stage3-jobs-csv", required=True)
     parser.add_argument("--contact-cutoff", type=float, default=5.0)
     parser.add_argument("--site-near-distance", type=float, default=6.0)
     parser.add_argument("--hotspot-near-distance", type=float, default=8.0)
@@ -882,29 +954,21 @@ def main() -> int:
     output_dir = output_root / "05_proteinmpnn_sequences"
     output_name_suffix = "" if args.stage3_mode == "proteinmpnn_fastrelax" else f"_{args.stage3_mode}"
     fasta_dir = output_dir / ("fasta" if args.stage3_mode == "proteinmpnn_fastrelax" else f"fasta_{args.stage3_mode}")
-    default_input_subdir = "proteinmpnn_only_pdbs" if args.stage3_mode == "proteinmpnn_only" else "fastrelax_pdbs"
-    input_pdb_dir = _resolve_mixed_path(args.input_pdb_dir) if args.input_pdb_dir else output_dir / default_input_subdir
     stage2_pass_csv = (
         _resolve_mixed_path(args.stage2_pass_csv)
         if args.stage2_pass_csv
         else stage3_root / "03_backbone_qc" / "FGA_rfpeptides_backbones_qc_pass.csv"
     )
-    stage3_jobs_csv = (
-        _resolve_mixed_path(args.stage3_jobs_csv)
-        if args.stage3_jobs_csv
-        else stage3_root / "04_proteinmpnn_inputs" / f"FGA_rfpeptides_stage3B_{args.stage3_mode}_jobs.csv"
-    )
-    old_fastrelax_jobs_csv = stage3_root / "04_proteinmpnn_inputs" / "FGA_rfpeptides_stage3_proteinmpnn_jobs.csv"
-    if not args.stage3_jobs_csv and not stage3_jobs_csv.exists() and args.stage3_mode == "proteinmpnn_fastrelax":
-        stage3_jobs_csv = old_fastrelax_jobs_csv
+    stage3_jobs_csv = _resolve_mixed_path(args.stage3_jobs_csv)
 
-    stage2_pass_lookup = _lookup_rows(_read_required_csv(stage2_pass_csv), ["design_id"])
-    stage3_job_rows = read_csv(stage3_jobs_csv)
-    stage3_job_lookup = _lookup_rows(stage3_job_rows, ["design_id"]) if stage3_job_rows else {}
+    stage2_pass_lookup = _strict_lookup_rows(_read_required_csv(stage2_pass_csv), "design_id", "Stage 2 pass")
+    stage3_job_lookup = _strict_lookup_rows(_read_required_csv(stage3_jobs_csv), "design_id", "Stage 3 job")
 
     selected_backbones = _split_csv(args.selected_backbones)
     if not selected_backbones:
         raise RuntimeError("--selected-backbones must not be empty")
+    if len(selected_backbones) != len(set(selected_backbones)):
+        raise RuntimeError("--selected-backbones contains duplicate backbone IDs")
 
     all_rows: list[dict[str, Any]] = []
     last_site_numbers: set[str] = set()
@@ -926,19 +990,31 @@ def main() -> int:
         last_target_chain = str(backbone_row.get("target_chain", "")).strip() or "A"
         last_peptide_chain = str(backbone_row.get("peptide_chain", "")).strip() or "B"
 
-        job_row = stage3_job_lookup.get(backbone_id, {})
-        output_pdb_dir = _resolve_mixed_path(str(job_row.get("output_pdb_dir", ""))) if job_row.get("output_pdb_dir") else input_pdb_dir
+        job_row = stage3_job_lookup.get(backbone_id)
+        if job_row is None:
+            raise RuntimeError(f"Selected backbone has no Stage 3 job row: {backbone_id}")
+        _validate_stage3_job_row(
+            backbone_id=backbone_id,
+            backbone_row=backbone_row,
+            job_row=job_row,
+            expected_stage3_mode=args.stage3_mode,
+        )
+        output_pdb_dir_text = str(job_row.get("output_pdb_dir", "")).strip()
+        if not output_pdb_dir_text:
+            raise RuntimeError(f"Stage 3 job is missing output_pdb_dir for {backbone_id}")
+        output_pdb_dir = _resolve_mixed_path(output_pdb_dir_text)
+        provenance = _stage3_job_provenance(job_row)
         relaxed_pdbs = _relaxed_pdbs_for_backbone(output_pdb_dir, backbone_id)
         if not relaxed_pdbs:
             missing_row = dict(backbone_row)
             missing_row["design_id"] = backbone_id
             all_rows.append(
                 {
+                    **provenance,
                     "sequence_design_id": f"{backbone_id}_missing_stage3b_output",
                     "backbone_id": backbone_id,
                     "site_label": backbone_row.get("site_label", ""),
                     "site_id": backbone_row.get("site_id", ""),
-                    "source_backbone_pdb": backbone_row.get("rf_pdb", ""),
                     "file_status": "fail_missing_stage3b_outputs",
                     "parse_status": "not_parsed",
                     "target_chain": last_target_chain,
@@ -954,8 +1030,7 @@ def main() -> int:
             continue
 
         for relaxed_pdb in relaxed_pdbs:
-            all_rows.append(
-                _qc_row_for_relaxed_pdb(
+            qc_row = _qc_row_for_relaxed_pdb(
                     relaxed_pdb=relaxed_pdb,
                     backbone_row=backbone_row,
                     site_numbers=site_numbers,
@@ -970,8 +1045,9 @@ def main() -> int:
                     macrocycle_pass_distance=args.macrocycle_pass_distance,
                     macrocycle_warn_distance=args.macrocycle_warn_distance,
                     forbidden_aas=args.forbidden_aas,
-                )
             )
+            qc_row.update(provenance)
+            all_rows.append(qc_row)
 
     pass_rows = [row for row in all_rows if row.get("pass_stage3c_qc") == "true"]
     write_csv(output_dir / f"FGA_rfpeptides_stage3{output_name_suffix}_sequences_qc.csv", all_rows, STAGE3C_FIELDS)
