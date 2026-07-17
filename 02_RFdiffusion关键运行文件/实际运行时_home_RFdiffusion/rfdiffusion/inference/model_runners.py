@@ -332,6 +332,9 @@ class Sampler:
         self.hotspot_0idx = iu.get_idx0_hotspots(
             self.mappings, self.ppi_conf, self.binderlen
         )
+        self.hotspot_0idx = sorted(int(index) for index in (self.hotspot_0idx or []))
+        self.contigmap_derived_hotspot_0idx = []
+        self.model_hotspot_tensor_0idx = []
         requested_hotspots = list(self.ppi_conf.hotspot_res or [])
         if requested_hotspots and len(self.hotspot_0idx or []) != len(requested_hotspots):
             raise RuntimeError(
@@ -705,12 +708,51 @@ class Sampler:
                 )
                 hotspot_idx = []
             else:
-                hotspots = [(i[0], int(i[1:])) for i in self.ppi_conf.hotspot_res]
-                hotspot_idx = []
-                for i, res in enumerate(self.contig_map.con_ref_pdb_idx):
-                    if res in hotspots:
-                        hotspot_idx.append(self.contig_map.hal_idx0[i])
+                hotspots = [(str(value)[0], int(str(value)[1:])) for value in self.ppi_conf.hotspot_res]
+                hotspot_set = set(hotspots)
+                if len(hotspot_set) != len(hotspots):
+                    raise RuntimeError(
+                        f"Duplicate hotspot residues are not allowed: {self.ppi_conf.hotspot_res}"
+                    )
+                if len(self.contig_map.con_ref_pdb_idx) != len(self.contig_map.hal_idx0):
+                    raise RuntimeError(
+                        "ContigMap reference/global-index arrays have different lengths: "
+                        f"refs={len(self.contig_map.con_ref_pdb_idx)} "
+                        f"hal_idx0={len(self.contig_map.hal_idx0)}"
+                    )
+                hotspot_idx = sorted(
+                    int(self.contig_map.hal_idx0[index])
+                    for index, residue in enumerate(self.contig_map.con_ref_pdb_idx)
+                    if tuple(residue) in hotspot_set
+                )
+                expected_hotspot_idx = sorted(int(index) for index in self.hotspot_0idx)
+                if len(hotspot_idx) != len(hotspot_set):
+                    raise RuntimeError(
+                        "Not all requested hotspots were independently recovered from the real ContigMap: "
+                        f"requested={sorted(hotspot_set)} derived={hotspot_idx}"
+                    )
+                if hotspot_idx != expected_hotspot_idx:
+                    raise RuntimeError(
+                        "ContigMap-derived hotspot indices disagree with get_idx0_hotspots(): "
+                        f"contigmap={hotspot_idx} helper={expected_hotspot_idx}"
+                    )
+                self.contigmap_derived_hotspot_0idx = list(hotspot_idx)
                 hotspot_tens[hotspot_idx] = 1.0
+                tensor_hotspot_idx = sorted(
+                    int(index)
+                    for index in torch.where(hotspot_tens > 0.0)[0].detach().cpu().tolist()
+                )
+                if tensor_hotspot_idx != expected_hotspot_idx:
+                    raise RuntimeError(
+                        "The model hotspot tensor does not mark the expected complex-global positions: "
+                        f"tensor={tensor_hotspot_idx} expected={expected_hotspot_idx}"
+                    )
+                if self.model_hotspot_tensor_0idx and self.model_hotspot_tensor_0idx != tensor_hotspot_idx:
+                    raise RuntimeError(
+                        "The model hotspot tensor changed between diffusion steps: "
+                        f"previous={self.model_hotspot_tensor_0idx} current={tensor_hotspot_idx}"
+                    )
+                self.model_hotspot_tensor_0idx = list(tensor_hotspot_idx)
 
             # Add blank (legacy) feature and hotspot tensor
             t1d = torch.cat(
@@ -720,6 +762,10 @@ class Sampler:
                     hotspot_tens[None, None, ..., None].to(self.device),
                 ),
                 dim=-1,
+            )
+        elif self.ppi_conf.hotspot_res:
+            raise RuntimeError(
+                "Hotspots were requested, but this model configuration has no t1d hotspot feature channel."
             )
 
         return (

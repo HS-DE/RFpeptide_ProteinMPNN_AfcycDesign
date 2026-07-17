@@ -2193,6 +2193,52 @@ strict_stage2_pass: true
 This is an engineering N1 smoke, not a production candidate and not enough to
 restart ProteinMPNN or Stage 5. A reviewed small batch is still required first.
 
+### Stage 1 to Stage 2 end-to-end hotspot provenance closure (N1-v3, 2026-07-16)
+
+The N1-v2 checks did not yet force Stage 2 to read the real TRB mapping when a
+runtime-audit JSON existed. N1-v3 closes that remaining gap.
+
+Stage 1 now locks the SHA-256 identity of the Stage 0 target PDB, crop mapping
+CSV, and normalized hotspot list. Its preflight constructs a real ContigMap
+from those inputs and the real contig. During `_preprocess()`, inference
+independently derives hotspot indices from ContigMap, compares them with
+`get_idx0_hotspots()`, creates the real model hotspot tensor, reads its nonzero
+positions with `torch.where`, and hard-fails on any disagreement.
+
+The final runtime audit is written only after the model tensor exists. The JSON
+and TRB copies must be exactly identical. Stage 2 always reads both files and
+verifies the complete mapping:
+
+```text
+Stage 0 residue -> TRB complex-global index -> model tensor index
+                -> writer chain/number -> output PDB chain/number
+```
+
+New smoke root:
+
+```text
+results/rfpeptides_article_route_clean_20260716_runtimefix_smoke_N1_v3/
+```
+
+Verified provenance result:
+
+```text
+Stage 0 target/mapping/hotspot hashes: pass
+JSON audit == TRB runtime_audit: pass
+TRB mapping == Stage 0 mapping: pass
+helper hotspot indices: 98,100,101,102
+ContigMap-derived indices: 98,100,101,102
+actual model tensor indices: 98,100,101,102
+runtime chain_idx == PDB chain order: pass
+runtime idx_pdb == PDB residue numbering: pass
+per-hotspot Stage0/TRB/tensor/PDB crosswalk: pass
+```
+
+The sampled N1-v3 backbone itself was detached and missed Site_2/hotspots, so
+`pass_backbone_qc=false`. This is a structural-design failure, not a provenance
+failure, and the structure must not enter Stage 3. No replacement sample was
+silently selected.
+
 ### Pre-hotspot-fix output quarantine (2026-07-16)
 
 All identified Stage 1-5 outputs that used or inherited the incorrect Site_2

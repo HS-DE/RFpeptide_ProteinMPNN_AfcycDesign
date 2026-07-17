@@ -1,0 +1,10 @@
+# RFpep_Site_2 RFpeptides hotspot residues
+
+RFpeptides hotspot CSV:
+A85,A82,A86,A84
+
+RFpeptides ppi.hotspot_res Python list:
+['A85','A82','A86','A84']
+
+Original 3GHG hotspot residues:
+G199,G196,G200,G198
