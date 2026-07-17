@@ -11,7 +11,7 @@ from collections import Counter
 from pathlib import Path
 from typing import Any, Iterable, Mapping, Sequence
 
-from common import append_run_header, read_csv, resolve_path, rows_to_markdown, setup_logger, write_csv, write_markdown
+from common import assert_active_route_path, append_run_header, read_csv, resolve_path, rows_to_markdown, setup_logger, write_csv, write_markdown
 from pdb_utils import ca_coord, centroid, distance, parse_residues, residue_sequence
 
 
@@ -1300,11 +1300,11 @@ def _write_pymol_review(
 
 def main() -> int:
     parser = argparse.ArgumentParser(description="Collect and QC RFpeptides Stage 1 backbone outputs before sequence design.")
-    parser.add_argument("--stage0-root", default="results/rfpeptides_article_route_clean_20260615_fpocket")
-    parser.add_argument("--stage1-root", default="results/rfpeptides_article_route_clean_20260615_fpocket_stage1_N1000_no_traj")
+    parser.add_argument("--stage0-root", required=True)
+    parser.add_argument("--stage1-root", required=True)
     parser.add_argument("--output-root", default="", help="Defaults to --stage1-root.")
     parser.add_argument("--output-subdir", default="03_backbone_qc")
-    parser.add_argument("--selected-sites", default="RFpep_Site_2")
+    parser.add_argument("--selected-sites", required=True)
     parser.add_argument("--stage0-summary-csv", default="")
     parser.add_argument("--stage1-jobs-csv", default="")
     parser.add_argument("--contact-cutoff", type=float, default=5.0)
@@ -1349,17 +1349,22 @@ def main() -> int:
     stage0_root = _resolve_mixed_path(args.stage0_root)
     stage1_root = _resolve_mixed_path(args.stage1_root)
     output_root = _resolve_mixed_path(args.output_root) if args.output_root else stage1_root
+    assert_active_route_path(stage0_root, "Stage 21 Stage 0 root")
+    assert_active_route_path(stage1_root, "Stage 21 Stage 1 root")
+    assert_active_route_path(output_root, "Stage 21 output root", must_exist=False)
     output_dir = output_root / args.output_subdir
     stage0_summary_csv = (
         _resolve_mixed_path(args.stage0_summary_csv)
         if args.stage0_summary_csv
         else stage0_root / "00_target_inputs" / "FGA_rfpeptides_stage0_target_inputs_summary.csv"
     )
+    assert_active_route_path(stage0_summary_csv, "Stage 21 Stage 0 summary CSV")
     stage1_jobs_csv = (
         _resolve_mixed_path(args.stage1_jobs_csv)
         if args.stage1_jobs_csv
         else stage1_root / "01_rfpeptides_jobs" / "FGA_rfpeptides_stage1_jobs.csv"
     )
+    assert_active_route_path(stage1_jobs_csv, "Stage 21 Stage 1 jobs CSV")
 
     stage0 = _stage0_lookup(_read_required_csv(stage0_summary_csv))
     stage1_jobs = _stage1_job_lookup(_read_required_csv(stage1_jobs_csv))
@@ -1385,6 +1390,7 @@ def main() -> int:
             str(site_row.get("rfpeptides_residue_range", ""))
         )
         stage0_target_pdb = _resolve_mixed_path(str(site_row.get("target_pdb", "")))
+        assert_active_route_path(stage0_target_pdb, f"Stage 21 target PDB for {site_label}")
         if not stage0_target_pdb.exists():
             raise RuntimeError(f"Missing Stage 0 target PDB for {site_label}: {stage0_target_pdb}")
         stage0_target_chains = parse_residues(stage0_target_pdb)
@@ -1398,12 +1404,14 @@ def main() -> int:
         target_sequence_expected = residue_sequence(stage0_target_residues)
         last_target_chain = target_chain_expected
         mapping_csv = _resolve_mixed_path(str(site_row.get("crop_renumbering_mapping_csv", "")))
+        assert_active_route_path(mapping_csv, f"Stage 21 mapping CSV for {site_label}")
         stage0_mapping_rows = _load_stage0_mapping_rows(mapping_csv)
         site_numbers, hotspot_numbers = _load_site_mapping(mapping_csv)
         last_site_numbers = site_numbers
         last_hotspot_numbers = hotspot_numbers
 
         output_prefix = _resolve_mixed_path(str(job_row.get("output_prefix", "")))
+        assert_active_route_path(output_prefix.parent, f"Stage 21 Stage 1 output parent for {site_label}")
         num_designs = _parse_int(job_row.get("num_designs", "0"))
         length_min = _parse_int(job_row.get("length_min", "0"))
         length_max = _parse_int(job_row.get("length_max", "0"))
@@ -1413,6 +1421,10 @@ def main() -> int:
             raise RuntimeError(f"Invalid length range in Stage 1 jobs table for {site_label}: {length_min}-{length_max}")
 
         for design_index, pdb_path, trb_path in _find_design_files(output_prefix, num_designs):
+            if pdb_path.exists():
+                assert_active_route_path(pdb_path, f"Stage 21 RFpeptides PDB {design_index}")
+            if trb_path.exists():
+                assert_active_route_path(trb_path, f"Stage 21 RFpeptides TRB {design_index}")
             qc_row = _qc_row_for_design(
                 design_index=design_index,
                 pdb_path=pdb_path,

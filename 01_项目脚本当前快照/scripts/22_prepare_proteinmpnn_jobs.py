@@ -7,7 +7,7 @@ import os
 from pathlib import Path
 from typing import Any, Iterable, Mapping
 
-from common import append_run_header, read_csv, resolve_path, rows_to_markdown, setup_logger, write_csv, write_markdown
+from common import assert_active_route_path, append_run_header, read_csv, resolve_path, rows_to_markdown, setup_logger, write_csv, write_markdown
 
 
 JOB_FIELDS = [
@@ -370,7 +370,7 @@ def main() -> int:
     parser.add_argument("--output-root", default="", help="Defaults to --stage2-root.")
     parser.add_argument("--stage2-pass-csv", default="")
     parser.add_argument("--selected-backbones", required=True)
-    parser.add_argument("--dl-binder-design-root", default="C:/SH/peptide_str/dl_binder_design")
+    parser.add_argument("--dl-binder-design-root", required=True)
     parser.add_argument("--seqs-per-backbone", type=int, default=8)
     parser.add_argument("--relax-cycles", type=int, default=0)
     parser.add_argument("--temperature", type=float, default=0.10)
@@ -401,6 +401,10 @@ def main() -> int:
         else stage2_root / "03_backbone_qc" / "FGA_rfpeptides_backbones_qc_pass.csv"
     )
     dl_binder_design_root = _resolve_mixed_path(args.dl_binder_design_root)
+    assert_active_route_path(stage2_root, "Stage 22 Stage 2 root")
+    assert_active_route_path(output_root, "Stage 22 output root", must_exist=False)
+    assert_active_route_path(stage2_pass_csv, "Stage 22 Stage 2 pass CSV")
+    assert_active_route_path(dl_binder_design_root, "Stage 22 dl_binder_design root")
     dl_interface_design_script = dl_binder_design_root / "mpnn_fr" / "dl_interface_design.py"
     if not dl_interface_design_script.exists():
         raise RuntimeError(f"Missing dl_interface_design.py: {dl_interface_design_script}")
@@ -425,6 +429,7 @@ def main() -> int:
         if str(row.get("pass_backbone_qc", "")).strip().lower() != "true":
             raise RuntimeError(f"Selected backbone is not marked pass_backbone_qc=true: {backbone_id}")
         source_pdb = _resolve_mixed_path(str(row.get("rf_pdb", "")))
+        assert_active_route_path(source_pdb, f"Stage 22 source backbone PDB for {backbone_id}")
         if not source_pdb.exists():
             raise RuntimeError(f"Missing source backbone PDB for {backbone_id}: {source_pdb}")
         peptide_chain = str(row.get("peptide_chain", "")).strip()

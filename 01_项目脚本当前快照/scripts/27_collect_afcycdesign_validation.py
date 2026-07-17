@@ -9,7 +9,7 @@ from typing import Any, Iterable, Mapping, Sequence
 
 import numpy as np
 
-from common import append_run_header, read_csv, resolve_path, rows_to_markdown, setup_logger, write_csv, write_markdown
+from common import assert_active_route_path, append_run_header, read_csv, resolve_path, rows_to_markdown, setup_logger, write_csv, write_markdown
 from pdb_utils import parse_residues, residue_sequence
 
 
@@ -624,11 +624,8 @@ models_passing_strict_recovery: {len(model_passes)}
 
 def main() -> int:
     parser = argparse.ArgumentParser(description="Parse Stage 5 AfCycDesign independent-recovery predictions.")
-    parser.add_argument(
-        "--stage5-root",
-        default="results/rfpeptides_article_route_clean_20260623_stage5A_v2_batch01_batch02/07_structure_validation",
-    )
-    parser.add_argument("--stage0-root", default="results/rfpeptides_article_route_clean_20260615_fpocket")
+    parser.add_argument("--stage5-root", required=True)
+    parser.add_argument("--stage0-root", required=True)
     parser.add_argument("--selected-candidates", default="")
     parser.add_argument("--contact-cutoff", type=float, default=5.0)
     parser.add_argument("--severe-clash-distance", type=float, default=1.2)
@@ -650,20 +647,25 @@ def main() -> int:
 
     stage5_root = _resolve_mixed_path(args.stage5_root)
     stage0_root = _resolve_mixed_path(args.stage0_root)
-    candidates = read_csv(stage5_root / "FGA_rfpeptides_stage5_candidate_manifest.csv")
+    assert_active_route_path(stage5_root, "Stage 27 Stage 5 root")
+    assert_active_route_path(stage0_root, "Stage 27 Stage 0 root")
+    candidate_manifest = stage5_root / "FGA_rfpeptides_stage5_candidate_manifest.csv"
+    assert_active_route_path(candidate_manifest, "Stage 27 candidate manifest CSV")
+    candidates = read_csv(candidate_manifest)
     if not candidates:
         raise RuntimeError(f"Missing Stage 5 candidate manifest: {stage5_root}")
     selected = set(_split_csv(args.selected_candidates))
     if selected:
         candidates = [row for row in candidates if row.get("stage5_candidate_id", "") in selected]
-    site_indices, hotspot_indices = _load_site_indices(
-        stage0_root / "00_target_inputs" / "RFpep_Site_2_crop_renumbering_mapping.csv"
-    )
+    mapping_csv = stage0_root / "00_target_inputs" / "RFpep_Site_2_crop_renumbering_mapping.csv"
+    assert_active_route_path(mapping_csv, "Stage 27 Stage 0 mapping CSV")
+    site_indices, hotspot_indices = _load_site_indices(mapping_csv)
 
     model_rows: list[dict[str, Any]] = []
     for candidate in candidates:
         candidate_id = candidate["stage5_candidate_id"]
         reference_pdb = _resolve_mixed_path(candidate["staged_design_pdb"])
+        assert_active_route_path(reference_pdb, f"Stage 27 reference PDB for {candidate_id}")
         reference_chains = parse_residues(reference_pdb)
         target_chain = candidate.get("target_chain", "A") or "A"
         peptide_chain = candidate.get("peptide_chain", "B") or "B"
@@ -673,6 +675,7 @@ def main() -> int:
         for seed_dir in sorted(candidate_dir.rglob("seed_*")) if candidate_dir.exists() else []:
             metrics = _metric_lookup(seed_dir)
             for prediction_pdb in sorted(seed_dir.glob("*.pdb")):
+                assert_active_route_path(prediction_pdb, f"Stage 27 prediction PDB for {candidate_id}")
                 metric = metrics.get(prediction_pdb.name)
                 if metric is None:
                     logger.warning("Skipping PDB without model_metrics.csv row: %s", prediction_pdb)

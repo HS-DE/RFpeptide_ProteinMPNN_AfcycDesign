@@ -130,6 +130,15 @@ REQUIRED_DIRS = [
 ]
 
 
+ACTIVE_ROUTE_DENY_MARKERS = (
+    "_archived_invalid_",
+    "03_旧错误路线生成脚本",
+    "04_旧n20假preflight样例_禁止运行",
+    "旧错误路线",
+    "禁止运行",
+)
+
+
 def project_root() -> Path:
     return Path(__file__).resolve().parents[1]
 
@@ -139,6 +148,56 @@ def resolve_path(path: str | Path, root: Optional[Path] = None) -> Path:
     if p.is_absolute():
         return p
     return (root or project_root()) / p
+
+
+def _mixed_path_variants(path: str | Path) -> list[str]:
+    text = str(path).strip().replace("\\", "/")
+    variants = [text]
+    if len(text) >= 3 and text[1] == ":" and text[2] == "/":
+        variants.append(f"/mnt/{text[0].lower()}{text[2:]}")
+    elif text.startswith("/mnt/") and len(text) > 7 and text[6] == "/":
+        variants.append(f"{text[5].upper()}:{text[6:]}")
+    return variants
+
+
+def _check_active_route_markers(path: str | Path, label: str) -> None:
+    for variant in _mixed_path_variants(path):
+        folded = variant.casefold()
+        for marker in ACTIVE_ROUTE_DENY_MARKERS:
+            if marker.casefold() in folded:
+                raise RuntimeError(
+                    f"Active-route input {label} is blocked: path={path}; "
+                    f"normalized={variant}; matched_marker={marker}"
+                )
+
+
+def assert_active_route_path(
+    path: str | Path,
+    label: str,
+    *,
+    must_exist: bool = True,
+) -> Path:
+    """Resolve a production path and reject archived or explicitly forbidden locations."""
+
+    _check_active_route_markers(path, label)
+    candidate = Path(path)
+    if not candidate.is_absolute():
+        candidate = resolve_path(candidate)
+    if must_exist and not candidate.exists():
+        raise FileNotFoundError(f"Missing active-route input {label}: {candidate}")
+
+    if candidate.exists():
+        resolved = candidate.resolve(strict=True)
+    else:
+        parent = candidate.parent
+        missing_parts = [candidate.name]
+        while not parent.exists() and parent != parent.parent:
+            missing_parts.append(parent.name)
+            parent = parent.parent
+        resolved_parent = parent.resolve(strict=True) if parent.exists() else parent.resolve()
+        resolved = resolved_parent.joinpath(*reversed(missing_parts))
+    _check_active_route_markers(resolved, label)
+    return resolved
 
 
 def deep_update(base: Dict[str, Any], override: Mapping[str, Any]) -> Dict[str, Any]:

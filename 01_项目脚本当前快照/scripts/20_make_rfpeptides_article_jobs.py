@@ -8,7 +8,7 @@ import re
 import subprocess
 from typing import Any, Iterable, Mapping
 
-from common import append_run_header, read_csv, resolve_path, rows_to_markdown, setup_logger, write_csv, write_markdown
+from common import assert_active_route_path, append_run_header, read_csv, resolve_path, rows_to_markdown, setup_logger, write_csv, write_markdown
 
 
 JOB_FIELDS = [
@@ -451,11 +451,11 @@ Important:
 
 def main() -> int:
     parser = argparse.ArgumentParser(description="Prepare RFpeptides Stage 1 job commands for FGA article-route pilot.")
-    parser.add_argument("--input-root", default="results/rfpeptides_article_route_clean_20260612")
-    parser.add_argument("--output-root", default="results/rfpeptides_article_route_clean_20260612")
-    parser.add_argument("--selected-sites", default="RFpep_Site_2")
+    parser.add_argument("--input-root", required=True)
+    parser.add_argument("--output-root", required=True)
+    parser.add_argument("--selected-sites", required=True)
     parser.add_argument("--stage0-summary-csv", default="")
-    parser.add_argument("--rfpeptides-root", default="/home/luomi/fga_model_envs/rfpeptides/RFdiffusion")
+    parser.add_argument("--rfpeptides-root", required=True)
     parser.add_argument("--num-designs", type=int, default=10)
     parser.add_argument("--length-min", type=int, default=12)
     parser.add_argument("--length-max", type=int, default=18)
@@ -487,6 +487,9 @@ def main() -> int:
     backbones_root = output_root / "02_rfpeptides_backbones"
     logs_dir = output_root / "logs"
     rfpeptides_root = resolve_path(args.rfpeptides_root)
+    assert_active_route_path(input_root, "Stage 20 input root")
+    assert_active_route_path(output_root, "Stage 20 output root", must_exist=False)
+    assert_active_route_path(rfpeptides_root, "Stage 20 RFpeptides root")
     if not (rfpeptides_root / "scripts" / "run_inference.py").exists():
         raise RuntimeError(f"Missing RFpeptides run_inference.py under --rfpeptides-root: {rfpeptides_root}")
     runtime_files = {
@@ -506,6 +509,7 @@ def main() -> int:
         if args.stage0_summary_csv
         else input_root / "00_target_inputs" / "FGA_rfpeptides_stage0_target_inputs_summary.csv"
     )
+    assert_active_route_path(stage0_summary_csv, "Stage 20 Stage 0 summary CSV")
     stage0_rows = _read_required_csv(stage0_summary_csv)
     stage0 = _stage0_lookup(stage0_rows)
 

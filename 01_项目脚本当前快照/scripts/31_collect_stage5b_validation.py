@@ -12,15 +12,11 @@ from typing import Any, Iterable, Mapping, Sequence
 
 import numpy as np
 
-from common import append_run_header, read_csv, resolve_path, rows_to_markdown, setup_logger, write_csv, write_markdown
+from common import assert_active_route_path, append_run_header, read_csv, resolve_path, rows_to_markdown, setup_logger, write_csv, write_markdown
 from pdb_utils import parse_residues, residue_sequence
 
 
 BACKBONE_ATOMS = ("N", "CA", "C")
-DEFAULT_STAGE5B_DIR = (
-    "results/rfpeptides_article_route_clean_20260623_stage5B_batch01_batch02/"
-    "07_structure_validation_target_conditioned"
-)
 
 MODEL_FIELDS = [
     "stage5B_candidate_id",
@@ -809,8 +805,8 @@ be interpreted as a valid recovery test for the intended site.
 
 def main() -> int:
     parser = argparse.ArgumentParser(description="Collect Stage 5B target-conditioned AfCycDesign predictions.")
-    parser.add_argument("--stage5b-root", default=DEFAULT_STAGE5B_DIR)
-    parser.add_argument("--stage0-root", default="results/rfpeptides_article_route_clean_20260615_fpocket")
+    parser.add_argument("--stage5b-root", required=True)
+    parser.add_argument("--stage0-root", required=True)
     parser.add_argument("--contact-cutoff", type=float, default=5.0)
     parser.add_argument("--hotspot-contact-distance", type=float, default=5.0)
     parser.add_argument("--severe-clash-distance", type=float, default=1.2)
@@ -830,18 +826,29 @@ def main() -> int:
     logger = setup_logger("31_collect_stage5b_validation")
     append_run_header(logger, "31_collect_stage5b_validation.py")
     stage5b_dir = _resolve_mixed_path(args.stage5b_root)
-    stage0_dir = _resolve_mixed_path(args.stage0_root) / "00_target_inputs"
-    manifest_rows = read_csv(stage5b_dir / "FGA_rfpeptides_stage5B_candidate_manifest.csv")
-    job_rows = read_csv(stage5b_dir / "FGA_rfpeptides_stage5B_prediction_jobs.csv")
+    stage0_root = _resolve_mixed_path(args.stage0_root)
+    assert_active_route_path(stage5b_dir, "Stage 31 Stage 5B root")
+    assert_active_route_path(stage0_root, "Stage 31 Stage 0 root")
+    stage0_dir = stage0_root / "00_target_inputs"
+    manifest_csv = stage5b_dir / "FGA_rfpeptides_stage5B_candidate_manifest.csv"
+    jobs_csv = stage5b_dir / "FGA_rfpeptides_stage5B_prediction_jobs.csv"
+    assert_active_route_path(manifest_csv, "Stage 31 Stage 5B candidate manifest CSV")
+    assert_active_route_path(jobs_csv, "Stage 31 Stage 5B prediction jobs CSV")
+    manifest_rows = read_csv(manifest_csv)
+    job_rows = read_csv(jobs_csv)
     if not manifest_rows or not job_rows:
         raise RuntimeError(f"Missing Stage 5B manifest or jobs CSV: {stage5b_dir}")
     manifest_lookup = {row["stage5B_candidate_id"]: row for row in manifest_rows}
-    template_chains = parse_residues(stage0_dir / "RFpep_Site_2_target.pdb")
+    target_template = stage0_dir / "RFpep_Site_2_target.pdb"
+    assert_active_route_path(target_template, "Stage 31 Stage 0 target template")
+    template_chains = parse_residues(target_template)
     if set(template_chains) != {"A"} or len(template_chains["A"]) != 86:
         raise RuntimeError("Stage 0 target template must contain only chain A with 86 residues")
     template_target = template_chains["A"]
+    mapping_csv = stage0_dir / "RFpep_Site_2_crop_renumbering_mapping.csv"
+    assert_active_route_path(mapping_csv, "Stage 31 Stage 0 mapping CSV")
     site_indices, hotspot_indices = _mapping_indices(
-        stage0_dir / "RFpep_Site_2_crop_renumbering_mapping.csv",
+        mapping_csv,
         86,
     )
 
@@ -852,15 +859,20 @@ def main() -> int:
             logger.error("No manifest row for job %s", job.get("stage5B_job_id", ""))
             continue
         prediction_dir = _resolve_mixed_path(job["prediction_output_dir"])
+        assert_active_route_path(prediction_dir, "Stage 31 prediction directory", must_exist=False)
         metadata_path = prediction_dir / "run_metadata.json"
         metrics_path = prediction_dir / "model_metrics.csv"
         if not metadata_path.is_file() or not metrics_path.is_file():
             continue
+        assert_active_route_path(metadata_path, "Stage 31 run metadata JSON")
+        assert_active_route_path(metrics_path, "Stage 31 model metrics CSV")
         try:
             metadata = json.loads(metadata_path.read_text(encoding="utf-8"))
             with metrics_path.open("r", encoding="utf-8", newline="") as handle:
                 metrics = list(csv.DictReader(handle))
-            reference_chains = parse_residues(_resolve_mixed_path(manifest["staged_reference_design_pdb"]))
+            reference_pdb = _resolve_mixed_path(manifest["staged_reference_design_pdb"])
+            assert_active_route_path(reference_pdb, "Stage 31 staged reference PDB")
+            reference_chains = parse_residues(reference_pdb)
             if "A" not in reference_chains or "B" not in reference_chains:
                 raise RuntimeError("Stage 4 reference PDB lacks chain A or B")
             for metric in metrics:
@@ -869,6 +881,8 @@ def main() -> int:
                 if not prediction_pdb.is_file() or not prediction_npz.is_file():
                     logger.error("Missing Stage 5B PDB/NPZ pair for %s", metric.get("model_name", ""))
                     continue
+                assert_active_route_path(prediction_pdb, "Stage 31 prediction PDB")
+                assert_active_route_path(prediction_npz, "Stage 31 prediction NPZ")
                 model_rows.append(
                     _model_row(
                         manifest,

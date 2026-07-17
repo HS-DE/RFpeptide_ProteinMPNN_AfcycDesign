@@ -9,7 +9,7 @@ from collections import Counter
 from pathlib import Path
 from typing import Any, Iterable, Mapping, Sequence
 
-from common import append_run_header, read_csv, resolve_path, rows_to_markdown, setup_logger, write_csv, write_markdown
+from common import assert_active_route_path, append_run_header, read_csv, resolve_path, rows_to_markdown, setup_logger, write_csv, write_markdown
 from pdb_utils import parse_residues, residue_sequence
 
 
@@ -234,6 +234,7 @@ def _mapped_site_hotspots(
     input_chains = parse_residues(input_pdb)
     input_target_residues = list(input_chains.get(target_chain, []))
     source_backbone_pdb = _resolve_mixed_path(str(backbone_row.get("rf_pdb", "")))
+    assert_active_route_path(source_backbone_pdb, "Stage 24 source backbone PDB")
     target_number_map, _, _ = qchelper._target_number_mapping(
         source_backbone_pdb=source_backbone_pdb,
         target_chain=target_chain,
@@ -436,10 +437,10 @@ Skipped input rows:
 
 def main() -> int:
     parser = argparse.ArgumentParser(description="Stage 3D-1 side-chain repack-only cleanup for ProteinMPNN-only outputs.")
-    parser.add_argument("--stage0-root", default="results/rfpeptides_article_route_clean_20260615_fpocket")
-    parser.add_argument("--stage3-root", default="results/rfpeptides_article_route_clean_20260615_fpocket_stage1_N1000_no_traj")
+    parser.add_argument("--stage0-root", required=True)
+    parser.add_argument("--stage3-root", required=True)
     parser.add_argument("--output-root", default="", help="Defaults to --stage3-root.")
-    parser.add_argument("--selected-backbones", default="RFpep_Site_2_0007")
+    parser.add_argument("--selected-backbones", required=True)
     parser.add_argument("--stage2-pass-csv", default="")
     parser.add_argument("--stage3c-qc-csv", default="")
     parser.add_argument("--output-pdb-dir", default="")
@@ -495,6 +496,11 @@ def main() -> int:
         if args.stage3c_qc_csv
         else output_dir / "FGA_rfpeptides_stage3_proteinmpnn_only_sequences_qc.csv"
     )
+    assert_active_route_path(stage0_root, "Stage 24 Stage 0 root")
+    assert_active_route_path(stage3_root, "Stage 24 Stage 3 root")
+    assert_active_route_path(output_root, "Stage 24 output root", must_exist=False)
+    assert_active_route_path(stage2_pass_csv, "Stage 24 Stage 2 pass CSV")
+    assert_active_route_path(stage3c_qc_csv, "Stage 24 Stage 3C QC CSV")
 
     selected_backbones = set(_split_csv(args.selected_backbones))
     if not selected_backbones:
@@ -532,6 +538,7 @@ def main() -> int:
         last_peptide_chain = peptide_chain
 
         input_pdb = _resolve_mixed_path(str(input_row.get("relaxed_pdb", "")))
+        assert_active_route_path(input_pdb, "Stage 24 Stage 3C input PDB")
         if not input_pdb.exists():
             raise RuntimeError(f"Missing Stage 3C input PDB: {input_pdb}")
         input_sequence = str(input_row.get("peptide_sequence", "")).strip()

@@ -8,7 +8,7 @@ from collections import Counter
 from pathlib import Path
 from typing import Any, Iterable, Mapping, Sequence
 
-from common import append_run_header, read_csv, resolve_path, rows_to_markdown, setup_logger, write_csv, write_fasta, write_markdown
+from common import assert_active_route_path, append_run_header, read_csv, resolve_path, rows_to_markdown, setup_logger, write_csv, write_fasta, write_markdown
 from pdb_utils import ca_coord, centroid, distance, parse_residues, residue_sequence
 
 
@@ -188,6 +188,8 @@ def _validate_stage3_job_row(
         raise RuntimeError(f"Stage 3 job is missing source backbone path/hash for {backbone_id}")
     job_source = _resolve_mixed_path(source_text)
     stage2_source = _resolve_mixed_path(str(backbone_row.get("rf_pdb", "")))
+    assert_active_route_path(job_source, f"Stage 23 job source PDB for {backbone_id}")
+    assert_active_route_path(stage2_source, f"Stage 23 Stage 2 source PDB for {backbone_id}")
     if not job_source.exists() or not stage2_source.exists():
         raise RuntimeError(f"Stage 3 source backbone PDB is missing for {backbone_id}")
     if job_source.resolve() != stage2_source.resolve():
@@ -960,6 +962,11 @@ def main() -> int:
         else stage3_root / "03_backbone_qc" / "FGA_rfpeptides_backbones_qc_pass.csv"
     )
     stage3_jobs_csv = _resolve_mixed_path(args.stage3_jobs_csv)
+    assert_active_route_path(stage0_root, "Stage 23 Stage 0 root")
+    assert_active_route_path(stage3_root, "Stage 23 Stage 3 root")
+    assert_active_route_path(output_root, "Stage 23 output root", must_exist=False)
+    assert_active_route_path(stage2_pass_csv, "Stage 23 Stage 2 pass CSV")
+    assert_active_route_path(stage3_jobs_csv, "Stage 23 Stage 3 jobs CSV")
 
     stage2_pass_lookup = _strict_lookup_rows(_read_required_csv(stage2_pass_csv), "design_id", "Stage 2 pass")
     stage3_job_lookup = _strict_lookup_rows(_read_required_csv(stage3_jobs_csv), "design_id", "Stage 3 job")
@@ -1003,6 +1010,7 @@ def main() -> int:
         if not output_pdb_dir_text:
             raise RuntimeError(f"Stage 3 job is missing output_pdb_dir for {backbone_id}")
         output_pdb_dir = _resolve_mixed_path(output_pdb_dir_text)
+        assert_active_route_path(output_pdb_dir, f"Stage 23 output PDB directory for {backbone_id}")
         provenance = _stage3_job_provenance(job_row)
         relaxed_pdbs = _relaxed_pdbs_for_backbone(output_pdb_dir, backbone_id)
         if not relaxed_pdbs:
@@ -1030,21 +1038,22 @@ def main() -> int:
             continue
 
         for relaxed_pdb in relaxed_pdbs:
+            assert_active_route_path(relaxed_pdb, f"Stage 23 Stage 3B PDB for {backbone_id}")
             qc_row = _qc_row_for_relaxed_pdb(
-                    relaxed_pdb=relaxed_pdb,
-                    backbone_row=backbone_row,
-                    site_numbers=site_numbers,
-                    hotspot_numbers=hotspot_numbers,
-                    contact_cutoff=args.contact_cutoff,
-                    site_near_distance=args.site_near_distance,
-                    hotspot_near_distance=args.hotspot_near_distance,
-                    severe_clash_distance=args.severe_clash_distance,
-                    min_target_contacts=args.min_target_contacts,
-                    min_site_contacts=args.min_site_contacts,
-                    min_hotspot_contacts=args.min_hotspot_contacts,
-                    macrocycle_pass_distance=args.macrocycle_pass_distance,
-                    macrocycle_warn_distance=args.macrocycle_warn_distance,
-                    forbidden_aas=args.forbidden_aas,
+                relaxed_pdb=relaxed_pdb,
+                backbone_row=backbone_row,
+                site_numbers=site_numbers,
+                hotspot_numbers=hotspot_numbers,
+                contact_cutoff=args.contact_cutoff,
+                site_near_distance=args.site_near_distance,
+                hotspot_near_distance=args.hotspot_near_distance,
+                severe_clash_distance=args.severe_clash_distance,
+                min_target_contacts=args.min_target_contacts,
+                min_site_contacts=args.min_site_contacts,
+                min_hotspot_contacts=args.min_hotspot_contacts,
+                macrocycle_pass_distance=args.macrocycle_pass_distance,
+                macrocycle_warn_distance=args.macrocycle_warn_distance,
+                forbidden_aas=args.forbidden_aas,
             )
             qc_row.update(provenance)
             all_rows.append(qc_row)

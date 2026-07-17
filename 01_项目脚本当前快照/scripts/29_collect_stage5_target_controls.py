@@ -9,7 +9,7 @@ from typing import Any, Mapping, Sequence
 
 import numpy as np
 
-from common import append_run_header, read_csv, resolve_path, rows_to_markdown, setup_logger, write_csv, write_markdown
+from common import assert_active_route_path, append_run_header, read_csv, resolve_path, rows_to_markdown, setup_logger, write_csv, write_markdown
 from pdb_utils import parse_residues, residue_sequence
 
 
@@ -322,11 +322,8 @@ These thresholds are control diagnostics, not peptide pass/fail criteria.
 
 def main() -> int:
     parser = argparse.ArgumentParser(description="Collect Stage 5 target-only recovery controls.")
-    parser.add_argument(
-        "--control-root",
-        default="results/rfpeptides_article_route_clean_20260623_stage5_target_controls_v1/07_structure_validation_target_controls",
-    )
-    parser.add_argument("--stage0-root", default="results/rfpeptides_article_route_clean_20260615_fpocket")
+    parser.add_argument("--control-root", required=True)
+    parser.add_argument("--stage0-root", required=True)
     parser.add_argument("--max-target-global-rmsd", type=float, default=3.0)
     parser.add_argument("--max-site2-local-rmsd", type=float, default=2.0)
     parser.add_argument("--max-hotspot-local-rmsd", type=float, default=2.0)
@@ -338,31 +335,45 @@ def main() -> int:
     append_run_header(logger, "29_collect_stage5_target_controls.py")
     control_root = _resolve_mixed_path(args.control_root)
     stage0_root = _resolve_mixed_path(args.stage0_root)
-    controls = read_csv(control_root / "FGA_rfpeptides_stage5_target_control_manifest.csv")
-    jobs = read_csv(control_root / "inputs" / "FGA_rfpeptides_stage5_target_control_jobs.csv")
+    assert_active_route_path(control_root, "Stage 29 target-control root")
+    assert_active_route_path(stage0_root, "Stage 29 Stage 0 root")
+    control_manifest = control_root / "FGA_rfpeptides_stage5_target_control_manifest.csv"
+    jobs_csv = control_root / "inputs" / "FGA_rfpeptides_stage5_target_control_jobs.csv"
+    assert_active_route_path(control_manifest, "Stage 29 target-control manifest CSV")
+    assert_active_route_path(jobs_csv, "Stage 29 target-control jobs CSV")
+    controls = read_csv(control_manifest)
+    jobs = read_csv(jobs_csv)
     if not controls or not jobs:
         raise RuntimeError(f"Missing target-control manifest or jobs CSV: {control_root}")
 
     reference_pdb = stage0_root / "00_target_inputs" / "RFpep_Site_2_target.pdb"
+    assert_active_route_path(reference_pdb, "Stage 29 Stage 0 reference PDB")
     reference_chains = parse_residues(reference_pdb)
     if "A" not in reference_chains:
         raise RuntimeError("Stage 0 reference target chain A is missing")
     reference_residues = reference_chains["A"]
     reference_sequence = residue_sequence(reference_residues)
+    mapping_csv = stage0_root / "00_target_inputs" / "RFpep_Site_2_crop_renumbering_mapping.csv"
+    assert_active_route_path(mapping_csv, "Stage 29 Stage 0 mapping CSV")
     site_indices, hotspot_indices = _mapping_indices(
-        stage0_root / "00_target_inputs" / "RFpep_Site_2_crop_renumbering_mapping.csv",
+        mapping_csv,
         len(reference_residues),
     )
 
     model_rows: list[dict[str, Any]] = []
     for job in jobs:
         prediction_dir = _resolve_mixed_path(job["prediction_output_dir"])
-        metrics = read_csv(prediction_dir / "model_metrics.csv")
+        assert_active_route_path(prediction_dir, "Stage 29 prediction directory", must_exist=False)
+        metrics_csv = prediction_dir / "model_metrics.csv"
+        if metrics_csv.exists():
+            assert_active_route_path(metrics_csv, "Stage 29 model metrics CSV")
+        metrics = read_csv(metrics_csv)
         for metric in metrics:
             prediction_pdb = _resolve_mixed_path(metric.get("prediction_pdb", ""))
             if not prediction_pdb.is_file():
                 logger.warning("Skipping missing target-control PDB: %s", prediction_pdb)
                 continue
+            assert_active_route_path(prediction_pdb, "Stage 29 target-control prediction PDB")
             try:
                 model_rows.append(
                     _model_row(

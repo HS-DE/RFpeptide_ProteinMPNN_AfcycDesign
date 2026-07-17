@@ -8,13 +8,12 @@ import shlex
 from pathlib import Path
 from typing import Any, Iterable, Mapping
 
-from common import append_run_header, read_csv, resolve_path, rows_to_markdown, setup_logger, write_csv, write_markdown
+from common import assert_active_route_path, append_run_header, read_csv, resolve_path, rows_to_markdown, setup_logger, write_csv, write_markdown
 from pdb_utils import parse_residues, residue_sequence
 
 
 COLABDESIGN_GAMMA_COMMIT = "5ab4efaba2321a6c3c314b82d2fff8e0241f5c2d"
 PROTOCOL_VERSION = "stage5_target_only_controls_v1"
-DEFAULT_OUTPUT_ROOT = "results/rfpeptides_article_route_clean_20260623_stage5_target_controls_v1"
 LEGAL_AA = set("ACDEFGHIKLMNPQRSTVWY")
 AA3_TO_AA1 = {
     "ALA": "A",
@@ -244,6 +243,8 @@ def _stage0_context(
 ) -> tuple[Path, str, list[int], list[int], int, int]:
     target_pdb = stage0_root / "00_target_inputs" / "RFpep_Site_2_target.pdb"
     mapping_csv = stage0_root / "00_target_inputs" / "RFpep_Site_2_crop_renumbering_mapping.csv"
+    assert_active_route_path(target_pdb, "Stage 28 Stage 0 target PDB")
+    assert_active_route_path(mapping_csv, "Stage 28 Stage 0 mapping CSV")
     if not target_pdb.is_file():
         raise RuntimeError(f"Missing Stage 0 target PDB: {target_pdb}")
     chains = parse_residues(target_pdb)
@@ -425,8 +426,8 @@ No prediction was started by this preparation script.
 
 def main() -> int:
     parser = argparse.ArgumentParser(description="Prepare Stage 5 target-only MLM/MSA recovery controls.")
-    parser.add_argument("--stage0-root", default="results/rfpeptides_article_route_clean_20260615_fpocket")
-    parser.add_argument("--output-root", default=DEFAULT_OUTPUT_ROOT)
+    parser.add_argument("--stage0-root", required=True)
+    parser.add_argument("--output-root", required=True)
     parser.add_argument("--full-target-fasta", default="data/input/FGA_full_length_1_866.fasta")
     parser.add_argument("--full-target-a3m", default="")
     parser.add_argument("--max-homolog-msa-rows", type=int, default=512)
@@ -455,6 +456,8 @@ def main() -> int:
     project_root = resolve_path(".")
     stage0_root = _resolve_mixed_path(args.stage0_root)
     output_root = _resolve_mixed_path(args.output_root)
+    assert_active_route_path(stage0_root, "Stage 28 Stage 0 root")
+    assert_active_route_path(output_root, "Stage 28 output root", must_exist=False)
     output_dir = output_root / "07_structure_validation_target_controls"
     inputs_dir = output_dir / "inputs"
     msa_dir = inputs_dir / "msas"
@@ -470,6 +473,7 @@ def main() -> int:
         args.expected_target_length,
     )
     full_fasta = _resolve_mixed_path(args.full_target_fasta)
+    assert_active_route_path(full_fasta, "Stage 28 full target FASTA")
     full_records = _read_fasta(full_fasta)
     if len(full_records) != 1:
         raise RuntimeError("Full FGA FASTA must contain exactly one query sequence")
@@ -485,6 +489,7 @@ def main() -> int:
     homolog_source = ""
     if args.full_target_a3m:
         source_a3m = _resolve_mixed_path(args.full_target_a3m)
+        assert_active_route_path(source_a3m, "Stage 28 homolog MSA A3M")
         if not source_a3m.is_file():
             raise RuntimeError(f"Provided full-target A3M does not exist: {source_a3m}")
         cropped_records = _crop_full_target_a3m(

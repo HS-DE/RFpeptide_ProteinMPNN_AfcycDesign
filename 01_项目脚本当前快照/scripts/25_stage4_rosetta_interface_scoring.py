@@ -9,7 +9,7 @@ from collections import Counter
 from pathlib import Path
 from typing import Any, Iterable, Mapping, Sequence
 
-from common import append_run_header, read_csv, resolve_path, rows_to_markdown, setup_logger, write_csv, write_markdown
+from common import assert_active_route_path, append_run_header, read_csv, resolve_path, rows_to_markdown, setup_logger, write_csv, write_markdown
 
 
 SCRIPT_DIR = Path(__file__).resolve().parent
@@ -594,10 +594,10 @@ Sequence liability notes:
 
 def main() -> int:
     parser = argparse.ArgumentParser(description="Stage 4 Rosetta score-only interface scoring for Stage 3D-1 RFpeptides outputs.")
-    parser.add_argument("--stage0-root", default="results/rfpeptides_article_route_clean_20260615_fpocket")
-    parser.add_argument("--stage3-root", default="results/rfpeptides_article_route_clean_20260615_fpocket_stage1_N1000_no_traj")
+    parser.add_argument("--stage0-root", required=True)
+    parser.add_argument("--stage3-root", required=True)
     parser.add_argument("--output-root", default="", help="Defaults to --stage3-root.")
-    parser.add_argument("--selected-backbones", default="RFpep_Site_2_0007")
+    parser.add_argument("--selected-backbones", required=True)
     parser.add_argument("--stage2-pass-csv", default="")
     parser.add_argument("--stage3d1-pass-csv", default="")
     parser.add_argument("--output-pdb-dir", default="")
@@ -657,6 +657,11 @@ def main() -> int:
         if args.stage3d1_pass_csv
         else stage3_root / "05_proteinmpnn_sequences" / "FGA_rfpeptides_stage3D1_sidechain_repack_qc_pass.csv"
     )
+    assert_active_route_path(stage0_root, "Stage 25 Stage 0 root")
+    assert_active_route_path(stage3_root, "Stage 25 Stage 3 root")
+    assert_active_route_path(output_root, "Stage 25 output root", must_exist=False)
+    assert_active_route_path(stage2_pass_csv, "Stage 25 Stage 2 pass CSV")
+    assert_active_route_path(stage3d1_pass_csv, "Stage 25 Stage 3D-1 pass CSV")
     args.stage3d1_pass_csv = str(stage3d1_pass_csv)
 
     selected_backbones = set(_split_csv(args.selected_backbones))
@@ -701,6 +706,7 @@ def main() -> int:
         last_peptide_chain = peptide_chain
 
         input_pdb = _resolve_mixed_path(str(input_row.get("repacked_pdb", "")))
+        assert_active_route_path(input_pdb, "Stage 25 Stage 3D-1 repacked PDB")
         if not input_pdb.exists():
             raise RuntimeError(f"Missing Stage 3D-1 repacked PDB: {input_pdb}")
         source_stage3d1_id = str(input_row.get("stage3d1_design_id", input_pdb.stem)).strip() or input_pdb.stem

@@ -8,14 +8,12 @@ import shutil
 from pathlib import Path
 from typing import Any, Mapping
 
-from common import append_run_header, read_csv, resolve_path, rows_to_markdown, setup_logger, write_csv, write_markdown
+from common import assert_active_route_path, append_run_header, read_csv, resolve_path, rows_to_markdown, setup_logger, write_csv, write_markdown
 from pdb_utils import parse_residues, residue_sequence
 
 
 COLABDESIGN_GAMMA_COMMIT = "5ab4efaba2321a6c3c314b82d2fff8e0241f5c2d"
 PROTOCOL_VERSION = "stage5B_v1_target_only_template_single_sequence_no_mlm_dropout"
-DEFAULT_STAGE5A_ROOT = "results/rfpeptides_article_route_clean_20260623_stage5A_v2_batch01_batch02"
-DEFAULT_OUTPUT_ROOT = "results/rfpeptides_article_route_clean_20260623_stage5B_batch01_batch02"
 LEGAL_AA = set("ACDEFGHIKLMNPQRSTVWY")
 
 MANIFEST_FIELDS = [
@@ -350,9 +348,9 @@ These are validation inputs, not final peptide candidates.
 
 def main() -> int:
     parser = argparse.ArgumentParser(description="Prepare Stage 5B target-structure-conditioned AfCycDesign jobs.")
-    parser.add_argument("--stage5a-root", default=DEFAULT_STAGE5A_ROOT)
-    parser.add_argument("--stage0-root", default="results/rfpeptides_article_route_clean_20260615_fpocket")
-    parser.add_argument("--output-root", default=DEFAULT_OUTPUT_ROOT)
+    parser.add_argument("--stage5a-root", required=True)
+    parser.add_argument("--stage0-root", required=True)
+    parser.add_argument("--output-root", required=True)
     parser.add_argument("--candidate-count", type=int, default=5)
     parser.add_argument("--seeds-per-candidate", type=int, default=5)
     parser.add_argument("--models-per-seed", type=int, default=5)
@@ -372,14 +370,19 @@ def main() -> int:
         raise RuntimeError("Stage 5B v1 is fixed at 6 recycles and an 86-aa target template.")
 
     project_root = resolve_path(".")
-    stage5a_dir = _resolve_mixed_path(args.stage5a_root) / "07_structure_validation"
+    stage5a_root = _resolve_mixed_path(args.stage5a_root)
+    assert_active_route_path(stage5a_root, "Stage 30 Stage 5A root")
+    stage5a_dir = stage5a_root / "07_structure_validation"
     source_manifest = stage5a_dir / "FGA_rfpeptides_stage5_candidate_manifest.csv"
+    assert_active_route_path(source_manifest, "Stage 30 Stage 5A candidate manifest CSV")
     source_rows = read_csv(source_manifest)
     if len(source_rows) < args.candidate_count:
         raise RuntimeError(f"Stage 5A-v2 manifest has {len(source_rows)} rows, expected at least 5: {source_manifest}")
     source_rows = sorted(source_rows, key=lambda row: int(row.get("selection_order", 999999)))[: args.candidate_count]
 
-    output_dir = _resolve_mixed_path(args.output_root) / "07_structure_validation_target_conditioned"
+    output_root = _resolve_mixed_path(args.output_root)
+    assert_active_route_path(output_root, "Stage 30 output root", must_exist=False)
+    output_dir = output_root / "07_structure_validation_target_conditioned"
     inputs_dir = output_dir / "inputs"
     target_dir = inputs_dir / "target"
     reference_dir = inputs_dir / "reference_design_poses"
@@ -388,16 +391,21 @@ def main() -> int:
     jobs_dir = output_dir / "jobs"
     predictions_dir = output_dir / "predictions"
 
-    stage0_dir = _resolve_mixed_path(args.stage0_root) / "00_target_inputs"
+    stage0_root = _resolve_mixed_path(args.stage0_root)
+    assert_active_route_path(stage0_root, "Stage 30 Stage 0 root")
+    stage0_dir = stage0_root / "00_target_inputs"
     source_target = stage0_dir / "RFpep_Site_2_target.pdb"
+    assert_active_route_path(source_target, "Stage 30 Stage 0 target template")
     if not source_target.is_file():
         raise RuntimeError(f"Missing Stage 0 target template: {source_target}")
     target_template = target_dir / source_target.name
     target_template.parent.mkdir(parents=True, exist_ok=True)
     shutil.copy2(source_target, target_template)
     target_sequence = _target_template_sequence(target_template, args.expected_target_length)
+    mapping_csv = stage0_dir / "RFpep_Site_2_crop_renumbering_mapping.csv"
+    assert_active_route_path(mapping_csv, "Stage 30 Stage 0 mapping CSV")
     site2_indices, hotspot_indices, mapping_sequence = _load_mapping(
-        stage0_dir / "RFpep_Site_2_crop_renumbering_mapping.csv",
+        mapping_csv,
         args.expected_target_length,
     )
     if mapping_sequence != target_sequence:
@@ -449,6 +457,7 @@ def main() -> int:
             source_design = _resolve_mixed_path(source.get("staged_design_pdb", ""))
         if not source_design.is_file():
             raise RuntimeError(f"Missing Stage 4 reference design PDB for candidate {order}")
+        assert_active_route_path(source_design, f"Stage 30 Stage 4 reference PDB for candidate {order}")
         design_target, design_peptide = _pdb_context(source_design, args.expected_target_length)
         if design_target != target_sequence or design_peptide != sequence:
             raise RuntimeError(f"Candidate {order} Stage 4 PDB sequences do not match target/manifest sequences")

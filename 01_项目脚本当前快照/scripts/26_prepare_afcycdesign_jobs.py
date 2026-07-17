@@ -10,14 +10,11 @@ from collections import defaultdict
 from pathlib import Path
 from typing import Any, Iterable, Mapping
 
-from common import append_run_header, read_csv, resolve_path, rows_to_markdown, setup_logger, write_csv, write_markdown
+from common import assert_active_route_path, append_run_header, read_csv, resolve_path, rows_to_markdown, setup_logger, write_csv, write_markdown
 
 
 COLABDESIGN_GAMMA_COMMIT = "5ab4efaba2321a6c3c314b82d2fff8e0241f5c2d"
 PROTOCOL_VERSION = "stage5A_v2_single_sequence_mlm015"
-DEFAULT_OUTPUT_ROOT = "results/rfpeptides_article_route_clean_20260623_stage5A_v2_batch01_batch02"
-DEFAULT_BATCH01_ROOT = "results/rfpeptides_article_route_clean_20260623_stage1_N10000_L12_24_batch01"
-DEFAULT_BATCH02_ROOT = "results/rfpeptides_article_route_clean_20260623_stage1_N10000_L12_24_batch02"
 
 AA3_TO_AA1 = {
     "ALA": "A",
@@ -841,10 +838,14 @@ def _master_script(job_scripts: list[Path], preflight: Path) -> str:
 
 def main() -> int:
     parser = argparse.ArgumentParser(description="Prepare merged Stage 5 AfCycDesign independent-recovery jobs.")
-    parser.add_argument("--batch01-root", default=DEFAULT_BATCH01_ROOT)
-    parser.add_argument("--batch02-root", default=DEFAULT_BATCH02_ROOT)
-    parser.add_argument("--stage0-root", default="results/rfpeptides_article_route_clean_20260615_fpocket")
-    parser.add_argument("--output-root", default=DEFAULT_OUTPUT_ROOT)
+    parser.add_argument(
+        "--source-run-root",
+        action="append",
+        required=True,
+        help="Upstream run root containing 06_rosetta_scoring. Repeat for each source run.",
+    )
+    parser.add_argument("--stage0-root", required=True)
+    parser.add_argument("--output-root", required=True)
     parser.add_argument("--candidate-count", type=int, default=5)
     parser.add_argument("--seeds-per-candidate", type=int, default=5)
     parser.add_argument("--models-per-seed", type=int, default=5)
@@ -880,19 +881,22 @@ def main() -> int:
         raise RuntimeError("--expected-target-length must be >= 1")
 
     project_root = resolve_path(".")
-    batch_roots = {
-        "batch01": _resolve_mixed_path(args.batch01_root),
-        "batch02": _resolve_mixed_path(args.batch02_root),
-    }
+    source_roots = [_resolve_mixed_path(value) for value in args.source_run_root]
+    if len(source_roots) != len({str(path.resolve()) for path in source_roots}):
+        raise RuntimeError("--source-run-root contains duplicate source roots")
     all_rows: list[dict[str, Any]] = []
-    for batch, root in batch_roots.items():
+    for root in source_roots:
+        assert_active_route_path(root, "Stage 26 source run root")
+        batch = root.name
         stage4_csv = root / "06_rosetta_scoring" / "FGA_rfpeptides_stage4_rosetta_interface_scores_pass.csv"
+        assert_active_route_path(stage4_csv, f"Stage 26 Stage 4 pass CSV for {batch}")
         all_rows.extend(_eligible_stage4_rows(_read_required_csv(stage4_csv), batch))
     if not all_rows:
         raise RuntimeError("No eligible Stage 4 hard-QC rows were found.")
 
     selected = _select_candidates(all_rows, args.candidate_count)
     output_root = _resolve_mixed_path(args.output_root)
+    assert_active_route_path(output_root, "Stage 26 output root", must_exist=False)
     output_dir = output_root / "07_structure_validation"
     inputs_dir = output_dir / "inputs"
     design_dir = inputs_dir / "design_poses"
@@ -902,7 +906,9 @@ def main() -> int:
     target_dir = inputs_dir / "target"
 
     stage0_root = _resolve_mixed_path(args.stage0_root)
+    assert_active_route_path(stage0_root, "Stage 26 Stage 0 root")
     source_target_pdb = stage0_root / "00_target_inputs" / "RFpep_Site_2_target.pdb"
+    assert_active_route_path(source_target_pdb, "Stage 26 Stage 0 target PDB")
     if not source_target_pdb.exists():
         raise RuntimeError(f"Missing Stage 0 target PDB: {source_target_pdb}")
     target_pdb = target_dir / source_target_pdb.name
@@ -914,6 +920,7 @@ def main() -> int:
         args.expected_target_length,
     )
     mapping_csv = stage0_root / "00_target_inputs" / "RFpep_Site_2_crop_renumbering_mapping.csv"
+    assert_active_route_path(mapping_csv, "Stage 26 Stage 0 mapping CSV")
     site2_indices, hotspot_indices, mapping_target_sequence = _load_site_indices(
         mapping_csv,
         args.expected_target_length,
@@ -950,6 +957,7 @@ def main() -> int:
     selected.sort(key=lambda row: (str(row["batch"]), _candidate_sort_key(row)))
     for selection_order, row in enumerate(selected, start=1):
         source_pdb = _resolve_mixed_path(str(row.get("scored_pdb", "")))
+        assert_active_route_path(source_pdb, "Stage 26 Stage 4 scored PDB")
         if not source_pdb.exists():
             raise RuntimeError(f"Missing Stage 4 scored PDB: {source_pdb}")
         sequence = _validate_sequence(str(row.get("peptide_sequence", "")), "Stage 4 peptide_sequence")
