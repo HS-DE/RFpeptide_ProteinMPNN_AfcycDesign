@@ -12,7 +12,24 @@ from typing import Any, Iterable, Mapping, Sequence
 
 import numpy as np
 
-from common import assert_active_route_path, append_run_header, read_csv, resolve_path, rows_to_markdown, setup_logger, write_csv, write_markdown
+from common import (
+    ROUTE_PROVENANCE_FIELDS,
+    SOURCE_ROUTE_PROVENANCE_FIELDS,
+    add_route_provenance,
+    assert_active_route_path,
+    append_run_header,
+    load_route_manifest,
+    read_csv,
+    resolve_path,
+    route_provenance_fields,
+    rows_to_markdown,
+    setup_logger,
+    validate_route_project_config,
+    validate_row_route_provenance,
+    validate_source_route_provenance,
+    write_csv,
+    write_markdown,
+)
 from pdb_utils import parse_residues, residue_sequence
 
 
@@ -95,7 +112,7 @@ MODEL_FIELDS = [
     "cyclic_topology_encoding",
     "protocol_identity_valid",
     "notes",
-]
+] + ROUTE_PROVENANCE_FIELDS + SOURCE_ROUTE_PROVENANCE_FIELDS
 
 CANDIDATE_FIELDS = [
     "stage5B_candidate_id",
@@ -132,7 +149,7 @@ CANDIDATE_FIELDS = [
     "best_seed",
     "stage5B_support_class",
     "support_reason",
-]
+] + ROUTE_PROVENANCE_FIELDS + SOURCE_ROUTE_PROVENANCE_FIELDS
 
 
 def _resolve_mixed_path(value: str | Path) -> Path:
@@ -595,6 +612,7 @@ def _model_row(
             "Stage 4 reference peptide coordinates were transformed through a reference-target-to-Stage-0 alignment before pose RMSD. "
             "Off-site contact metrics are descriptive and are not a hard gate in Stage 5B v1."
         ),
+        **{field: manifest.get(field, "") for field in SOURCE_ROUTE_PROVENANCE_FIELDS},
     }
 
 
@@ -706,6 +724,7 @@ def _candidate_summaries(
                 "best_seed": best.get("seed", "") if best else "",
                 "stage5B_support_class": support_class,
                 "support_reason": reason,
+                **{field: manifest.get(field, "") for field in SOURCE_ROUTE_PROVENANCE_FIELDS},
             }
         )
     return summaries
@@ -807,6 +826,7 @@ def main() -> int:
     parser = argparse.ArgumentParser(description="Collect Stage 5B target-conditioned AfCycDesign predictions.")
     parser.add_argument("--stage5b-root", required=True)
     parser.add_argument("--stage0-root", required=True)
+    parser.add_argument("--project-config", required=True)
     parser.add_argument("--contact-cutoff", type=float, default=5.0)
     parser.add_argument("--hotspot-contact-distance", type=float, default=5.0)
     parser.add_argument("--severe-clash-distance", type=float, default=1.2)
@@ -829,6 +849,9 @@ def main() -> int:
     stage0_root = _resolve_mixed_path(args.stage0_root)
     assert_active_route_path(stage5b_dir, "Stage 31 Stage 5B root")
     assert_active_route_path(stage0_root, "Stage 31 Stage 0 root")
+    route_manifest_path, route_manifest, route_manifest_sha256 = load_route_manifest(stage5b_dir.parent)
+    validate_route_project_config(args.project_config, route_manifest)
+    route_provenance = route_provenance_fields(route_manifest_path, route_manifest, route_manifest_sha256)
     stage0_dir = stage0_root / "00_target_inputs"
     manifest_csv = stage5b_dir / "FGA_rfpeptides_stage5B_candidate_manifest.csv"
     jobs_csv = stage5b_dir / "FGA_rfpeptides_stage5B_prediction_jobs.csv"
@@ -838,6 +861,12 @@ def main() -> int:
     job_rows = read_csv(jobs_csv)
     if not manifest_rows or not job_rows:
         raise RuntimeError(f"Missing Stage 5B manifest or jobs CSV: {stage5b_dir}")
+    for row in manifest_rows:
+        validate_row_route_provenance(row, route_provenance, "Stage 31 Stage 5B candidate row")
+        validate_source_route_provenance(row, "Stage 31 Stage 5B candidate row")
+    for row in job_rows:
+        validate_row_route_provenance(row, route_provenance, "Stage 31 Stage 5B job row")
+        validate_source_route_provenance(row, "Stage 31 Stage 5B job row")
     manifest_lookup = {row["stage5B_candidate_id"]: row for row in manifest_rows}
     target_template = stage0_dir / "RFpep_Site_2_target.pdb"
     assert_active_route_path(target_template, "Stage 31 Stage 0 target template")
@@ -902,7 +931,9 @@ def main() -> int:
             logger.error("Failed to parse job %s: %s: %s", job.get("stage5B_job_id", ""), exc.__class__.__name__, exc)
 
     expected_models_per_candidate = 25
+    add_route_provenance(model_rows, route_provenance)
     candidate_rows = _candidate_summaries(manifest_rows, model_rows, expected_models_per_candidate, 5)
+    add_route_provenance(candidate_rows, route_provenance)
     write_csv(stage5b_dir / "FGA_rfpeptides_stage5B_model_results.csv", model_rows, MODEL_FIELDS)
     write_csv(stage5b_dir / "FGA_rfpeptides_stage5B_candidate_summary.csv", candidate_rows, CANDIDATE_FIELDS)
     write_markdown(

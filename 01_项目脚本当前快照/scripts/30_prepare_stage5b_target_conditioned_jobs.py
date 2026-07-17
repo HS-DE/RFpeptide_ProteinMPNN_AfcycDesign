@@ -8,12 +8,30 @@ import shutil
 from pathlib import Path
 from typing import Any, Mapping
 
-from common import assert_active_route_path, append_run_header, read_csv, resolve_path, rows_to_markdown, setup_logger, write_csv, write_markdown
+from common import (
+    ROUTE_PROVENANCE_FIELDS,
+    SOURCE_ROUTE_PROVENANCE_FIELDS,
+    assert_active_route_path,
+    append_run_header,
+    load_route_manifest,
+    read_csv,
+    resolve_path,
+    route_provenance_fields,
+    rows_to_markdown,
+    setup_logger,
+    validate_route_project_config,
+    validate_row_route_provenance,
+    validate_source_route_provenance,
+    write_csv,
+    write_markdown,
+    write_route_manifest,
+)
 from pdb_utils import parse_residues, residue_sequence
 
 
 COLABDESIGN_GAMMA_COMMIT = "5ab4efaba2321a6c3c314b82d2fff8e0241f5c2d"
 PROTOCOL_VERSION = "stage5B_v1_target_only_template_single_sequence_no_mlm_dropout"
+SOURCE_STAGE5A_PROTOCOL_VERSION = "stage5A_v2_single_sequence_mlm015"
 LEGAL_AA = set("ACDEFGHIKLMNPQRSTVWY")
 
 MANIFEST_FIELDS = [
@@ -65,7 +83,7 @@ MANIFEST_FIELDS = [
     "models_per_seed",
     "prediction_job_count",
     "status",
-]
+] + ROUTE_PROVENANCE_FIELDS + SOURCE_ROUTE_PROVENANCE_FIELDS
 
 JOB_FIELDS = [
     "stage5B_job_id",
@@ -95,7 +113,7 @@ JOB_FIELDS = [
     "requested_recycles",
     "forward_passes",
     "status",
-]
+] + ROUTE_PROVENANCE_FIELDS + SOURCE_ROUTE_PROVENANCE_FIELDS
 
 
 def _safe_token(value: Any) -> str:
@@ -351,6 +369,7 @@ def main() -> int:
     parser.add_argument("--stage5a-root", required=True)
     parser.add_argument("--stage0-root", required=True)
     parser.add_argument("--output-root", required=True)
+    parser.add_argument("--project-config", required=True)
     parser.add_argument("--candidate-count", type=int, default=5)
     parser.add_argument("--seeds-per-candidate", type=int, default=5)
     parser.add_argument("--models-per-seed", type=int, default=5)
@@ -372,6 +391,16 @@ def main() -> int:
     project_root = resolve_path(".")
     stage5a_root = _resolve_mixed_path(args.stage5a_root)
     assert_active_route_path(stage5a_root, "Stage 30 Stage 5A root")
+    source_manifest_path, source_route_manifest, source_manifest_sha256 = load_route_manifest(stage5a_root)
+    validate_route_project_config(args.project_config, source_route_manifest)
+    source_stage5_protocol = source_route_manifest.get("stage5_protocol", {})
+    if not isinstance(source_stage5_protocol, dict) or source_stage5_protocol.get("protocol_version") != SOURCE_STAGE5A_PROTOCOL_VERSION:
+        raise RuntimeError("Stage 30 requires a Stage 5A-v2 source route manifest")
+    source_route_provenance = route_provenance_fields(
+        source_manifest_path,
+        source_route_manifest,
+        source_manifest_sha256,
+    )
     stage5a_dir = stage5a_root / "07_structure_validation"
     source_manifest = stage5a_dir / "FGA_rfpeptides_stage5_candidate_manifest.csv"
     assert_active_route_path(source_manifest, "Stage 30 Stage 5A candidate manifest CSV")
@@ -379,6 +408,9 @@ def main() -> int:
     if len(source_rows) < args.candidate_count:
         raise RuntimeError(f"Stage 5A-v2 manifest has {len(source_rows)} rows, expected at least 5: {source_manifest}")
     source_rows = sorted(source_rows, key=lambda row: int(row.get("selection_order", 999999)))[: args.candidate_count]
+    for source_row in source_rows:
+        validate_row_route_provenance(source_row, source_route_provenance, "Stage 30 Stage 5A candidate row")
+        validate_source_route_provenance(source_row, "Stage 30 Stage 5A candidate row")
 
     output_root = _resolve_mixed_path(args.output_root)
     assert_active_route_path(output_root, "Stage 30 output root", must_exist=False)
@@ -437,6 +469,32 @@ def main() -> int:
         "requested_recycles": args.recycles,
     }
     protocol_hash = _protocol_hash(protocol_payload)
+    route_manifest_path, route_manifest, route_manifest_sha256 = write_route_manifest(
+        output_root,
+        {
+            "batch_id": f"stage5B_{source_route_manifest['batch_id']}",
+            "site_labels": list(source_route_manifest["site_labels"]),
+            "protocol_peptide_length_min": int(source_route_manifest["protocol_peptide_length_min"]),
+            "protocol_peptide_length_max": int(source_route_manifest["protocol_peptide_length_max"]),
+            "run_peptide_length_min": int(source_route_manifest["run_peptide_length_min"]),
+            "run_peptide_length_max": int(source_route_manifest["run_peptide_length_max"]),
+            "num_designs_requested": int(source_route_manifest["num_designs_requested"]),
+            "project_config": source_route_manifest["project_config"],
+            "project_config_sha256": source_route_manifest["project_config_sha256"],
+            "effective_project_config_sha256": source_route_manifest["effective_project_config_sha256"],
+            "stage0_sites": list(source_route_manifest["stage0_sites"]),
+            "source_route_manifests": [
+                {
+                    "run_id": source_route_manifest["run_id"],
+                    "batch_id": source_route_manifest["batch_id"],
+                    "manifest_path": str(source_manifest_path),
+                    "manifest_sha256": source_manifest_sha256,
+                }
+            ],
+            "stage5B_protocol": protocol_payload,
+        },
+    )
+    route_provenance = route_provenance_fields(route_manifest_path, route_manifest, route_manifest_sha256)
     _write_text(target_dir / "RFpep_Site_2_target.fasta", f">RFpep_Site_2_target\n{target_sequence}")
 
     runner = project_root / "scripts" / "external" / "run_afcycdesign_target_conditioned_recovery.py"
@@ -523,6 +581,8 @@ def main() -> int:
             "models_per_seed": args.models_per_seed,
             "prediction_job_count": args.seeds_per_candidate,
             "status": "prepared_not_run",
+            **{field: source.get(field, "") for field in SOURCE_ROUTE_PROVENANCE_FIELDS},
+            **route_provenance,
         }
         manifest_rows.append(row)
 
@@ -577,6 +637,8 @@ def main() -> int:
                 "cyclic_topology_encoding": "peptide_chain_relative_position_cyclic_offset",
                 "prediction_output_dir": _to_wsl_path(prediction_output),
                 "colabdesign_commit": COLABDESIGN_GAMMA_COMMIT,
+                **{field: source.get(field, "") for field in SOURCE_ROUTE_PROVENANCE_FIELDS},
+                **route_provenance,
             }
             _write_text(spec_path, json.dumps(spec, indent=2, sort_keys=True))
             if seed == 0:
@@ -625,6 +687,8 @@ def main() -> int:
                     "requested_recycles": args.recycles,
                     "forward_passes": args.recycles + 1,
                     "status": "prepared_not_run",
+                    **{field: source.get(field, "") for field in SOURCE_ROUTE_PROVENANCE_FIELDS},
+                    **route_provenance,
                 }
             )
 

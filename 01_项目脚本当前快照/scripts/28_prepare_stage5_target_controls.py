@@ -8,7 +8,21 @@ import shlex
 from pathlib import Path
 from typing import Any, Iterable, Mapping
 
-from common import assert_active_route_path, append_run_header, read_csv, resolve_path, rows_to_markdown, setup_logger, write_csv, write_markdown
+from common import (
+    ROUTE_PROVENANCE_FIELDS,
+    assert_active_route_path,
+    append_run_header,
+    load_route_manifest,
+    read_csv,
+    resolve_path,
+    route_provenance_fields,
+    rows_to_markdown,
+    setup_logger,
+    validate_route_project_config,
+    write_csv,
+    write_markdown,
+    write_route_manifest,
+)
 from pdb_utils import parse_residues, residue_sequence
 
 
@@ -60,7 +74,7 @@ CONTROL_FIELDS = [
     "protocol_hash",
     "status",
     "notes",
-]
+] + ROUTE_PROVENANCE_FIELDS
 
 JOB_FIELDS = [
     "stage5_control_job_id",
@@ -83,7 +97,7 @@ JOB_FIELDS = [
     "use_initial_guess",
     "peptide_included",
     "status",
-]
+] + ROUTE_PROVENANCE_FIELDS
 
 
 def _sha1_text(value: str) -> str:
@@ -426,8 +440,10 @@ No prediction was started by this preparation script.
 
 def main() -> int:
     parser = argparse.ArgumentParser(description="Prepare Stage 5 target-only MLM/MSA recovery controls.")
+    parser.add_argument("--source-run-root", required=True)
     parser.add_argument("--stage0-root", required=True)
     parser.add_argument("--output-root", required=True)
+    parser.add_argument("--project-config", required=True)
     parser.add_argument("--full-target-fasta", default="data/input/FGA_full_length_1_866.fasta")
     parser.add_argument("--full-target-a3m", default="")
     parser.add_argument("--max-homolog-msa-rows", type=int, default=512)
@@ -454,10 +470,14 @@ def main() -> int:
         raise RuntimeError("Invalid recycle or homolog MSA row setting")
 
     project_root = resolve_path(".")
+    source_run_root = _resolve_mixed_path(args.source_run_root)
     stage0_root = _resolve_mixed_path(args.stage0_root)
     output_root = _resolve_mixed_path(args.output_root)
+    assert_active_route_path(source_run_root, "Stage 28 source run root")
     assert_active_route_path(stage0_root, "Stage 28 Stage 0 root")
     assert_active_route_path(output_root, "Stage 28 output root", must_exist=False)
+    source_manifest_path, source_manifest, source_manifest_sha256 = load_route_manifest(source_run_root)
+    validate_route_project_config(args.project_config, source_manifest)
     output_dir = output_root / "07_structure_validation_target_controls"
     inputs_dir = output_dir / "inputs"
     msa_dir = inputs_dir / "msas"
@@ -472,6 +492,37 @@ def main() -> int:
         stage0_root,
         args.expected_target_length,
     )
+    route_manifest_path, route_manifest, route_manifest_sha256 = write_route_manifest(
+        output_root,
+        {
+            "batch_id": f"target_controls_{source_manifest['batch_id']}",
+            "site_labels": list(source_manifest["site_labels"]),
+            "protocol_peptide_length_min": int(source_manifest["protocol_peptide_length_min"]),
+            "protocol_peptide_length_max": int(source_manifest["protocol_peptide_length_max"]),
+            "run_peptide_length_min": int(source_manifest["run_peptide_length_min"]),
+            "run_peptide_length_max": int(source_manifest["run_peptide_length_max"]),
+            "num_designs_requested": int(source_manifest["num_designs_requested"]),
+            "project_config": source_manifest["project_config"],
+            "project_config_sha256": source_manifest["project_config_sha256"],
+            "effective_project_config_sha256": source_manifest["effective_project_config_sha256"],
+            "stage0_sites": list(source_manifest["stage0_sites"]),
+            "source_route_manifests": [
+                {
+                    "run_id": source_manifest["run_id"],
+                    "batch_id": source_manifest["batch_id"],
+                    "manifest_path": str(source_manifest_path),
+                    "manifest_sha256": source_manifest_sha256,
+                }
+            ],
+            "stage5_target_control_protocol": {
+                "protocol_version": PROTOCOL_VERSION,
+                "seeds_per_group": args.seeds_per_group,
+                "models_per_seed": args.models_per_seed,
+                "requested_recycles": args.recycles,
+            },
+        },
+    )
+    route_provenance = route_provenance_fields(route_manifest_path, route_manifest, route_manifest_sha256)
     full_fasta = _resolve_mixed_path(args.full_target_fasta)
     assert_active_route_path(full_fasta, "Stage 28 full target FASTA")
     full_records = _read_fasta(full_fasta)
@@ -565,6 +616,7 @@ def main() -> int:
                         else "requires verified real full-target FGA homolog A3M; no synthetic MSA generated"
                     )
                 ),
+                **route_provenance,
             }
         )
         for seed in range(args.seeds_per_group):
@@ -600,6 +652,7 @@ def main() -> int:
                 "colabdesign_commit": COLABDESIGN_GAMMA_COMMIT,
                 "prediction_output_dir": _to_wsl_path(prediction_dir),
                 "status": "prepared_not_run" if runnable else "blocked_missing_real_homolog_msa",
+                **route_provenance,
             }
             _write_text(spec_path, json.dumps(spec, indent=2, sort_keys=True))
             run_script = jobs_dir / f"run_{job_id}.sh"
@@ -640,6 +693,7 @@ def main() -> int:
                     "use_initial_guess": "false",
                     "peptide_included": "false",
                     "status": "prepared_not_run" if runnable else "blocked_missing_real_homolog_msa",
+                    **route_provenance,
                 }
             )
 

@@ -25,6 +25,10 @@ def _load_script(name: str, filename: str):
 
 stage22 = _load_script("stage22_under_test", "22_prepare_proteinmpnn_jobs.py")
 stage23 = _load_script("stage23_under_test", "23_collect_proteinmpnn_sequences.py")
+import common  # noqa: E402
+
+
+ACTIVE_CONFIG = SCRIPTS_DIR.parents[1] / "05_配置快照" / "config" / "rfpeptides_head_to_tail.yaml"
 
 
 def _atom(serial: int, chain: str, resi: int, x: float) -> str:
@@ -56,6 +60,40 @@ class Stage3ProvenanceTests(unittest.TestCase):
     def _prepare_fixture(self, root: Path) -> tuple[Path, Path, list[str]]:
         stage2_root = root / "stage2"
         stage2_root.mkdir(parents=True, exist_ok=True)
+        target_pdb = root / "stage0_target.pdb"
+        mapping_csv = root / "stage0_mapping.csv"
+        target_pdb.write_text("ATOM\nEND\n", encoding="utf-8")
+        mapping_csv.write_text("rfpeptides_chain,rfpeptides_residue_number\nA,1\n", encoding="utf-8")
+        _, config_sha, effective_sha = common.load_active_route_config(ACTIVE_CONFIG)
+        hotspots = ["A82", "A84", "A85", "A86"]
+        manifest_payload = {
+                "batch_id": "stage3_fixture",
+                "site_labels": ["RFpep_Site_2"],
+                "protocol_peptide_length_min": 12,
+                "protocol_peptide_length_max": 24,
+                "run_peptide_length_min": 12,
+                "run_peptide_length_max": 18,
+                "num_designs_requested": 3,
+                "project_config": str(ACTIVE_CONFIG),
+                "project_config_sha256": config_sha,
+                "effective_project_config_sha256": effective_sha,
+                "stage0_sites": [
+                    {
+                        "site_label": "RFpep_Site_2",
+                        "target_pdb": str(target_pdb),
+                        "target_pdb_sha256": common.sha256_file(target_pdb),
+                        "mapping_csv": str(mapping_csv),
+                        "mapping_csv_sha256": common.sha256_file(mapping_csv),
+                        "normalized_hotspots": hotspots,
+                        "normalized_hotspots_sha256": common.canonical_json_sha256(hotspots),
+                    }
+                ],
+            }
+        if (stage2_root / "route_manifest.json").exists():
+            manifest_path, manifest, manifest_sha = common.load_route_manifest(stage2_root)
+        else:
+            manifest_path, manifest, manifest_sha = common.write_route_manifest(stage2_root, manifest_payload)
+        route_provenance = common.route_provenance_fields(manifest_path, manifest, manifest_sha)
         ids = ["RFpep_Site_2_0002", "RFpep_Site_2_0017", "RFpep_Site_2_0018"]
         rows = []
         for idx, design_id in enumerate(ids, start=1):
@@ -71,6 +109,7 @@ class Stage3ProvenanceTests(unittest.TestCase):
                     "target_chain": "A",
                     "pass_backbone_qc": "true",
                     "peptide_length": str(12 + idx),
+                    **route_provenance,
                 }
             )
         pass_csv = root / "stage2_pass.csv"
@@ -100,6 +139,8 @@ class Stage3ProvenanceTests(unittest.TestCase):
             str(stage2_root),
             "--output-root",
             str(output_root),
+            "--project-config",
+            str(ACTIVE_CONFIG),
             "--stage2-pass-csv",
             str(pass_csv),
             "--selected-backbones",
@@ -169,6 +210,64 @@ class PdbNormalizationTests(unittest.TestCase):
                 encoding="utf-8",
             )
             with self.assertRaisesRegex(RuntimeError, "Multi-model"):
+                stage22._copy_or_reorder_pdb(source, output, peptide_chain="B", target_chain="A")
+
+    def test_peptide_first_preserves_coordinate_records_header_and_footer(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            source = Path(tmp) / "source.pdb"
+            output = Path(tmp) / "output.pdb"
+            peptide_atom = _atom(1, "B", 1, 0.0)
+            peptide_anisou = peptide_atom.replace("ATOM  ", "ANISOU", 1)
+            target_hetatm = _atom(2, "A", 1, 2.0).replace("ATOM  ", "HETATM", 1)
+            source.write_text(
+                "\n".join(
+                    [
+                        "HEADER    SYNTHETIC TEST",
+                        peptide_atom,
+                        peptide_anisou,
+                        "TER",
+                        target_hetatm,
+                        "TER",
+                        "CONECT    1    2",
+                        "MASTER        0",
+                        "END",
+                    ]
+                )
+                + "\n",
+                encoding="utf-8",
+            )
+            stage22._copy_or_reorder_pdb(source, output, peptide_chain="B", target_chain="A")
+            lines = output.read_text(encoding="utf-8").splitlines()
+
+        self.assertEqual(lines[0], "HEADER    SYNTHETIC TEST")
+        self.assertEqual([line for line in lines if line.startswith(("ATOM  ", "HETATM", "ANISOU"))], [
+            peptide_atom,
+            peptide_anisou,
+            target_hetatm,
+        ])
+        self.assertLess(lines.index("CONECT    1    2"), lines.index("END"))
+        self.assertEqual(sum(line == "TER" for line in lines), 2)
+
+    def test_missing_or_ambiguous_chain_identity_is_rejected(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            source = Path(tmp) / "source.pdb"
+            output = Path(tmp) / "output.pdb"
+            source.write_text(_atom(1, "A", 1, 0.0) + "\nEND\n", encoding="utf-8")
+            with self.assertRaisesRegex(RuntimeError, "Missing required"):
+                stage22._copy_or_reorder_pdb(source, output, peptide_chain="B", target_chain="A")
+            with self.assertRaisesRegex(RuntimeError, "must differ"):
+                stage22._copy_or_reorder_pdb(source, output, peptide_chain="A", target_chain="A")
+
+    def test_coordinate_associated_record_before_coordinates_is_rejected(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            source = Path(tmp) / "source.pdb"
+            output = Path(tmp) / "output.pdb"
+            anisou = _atom(1, "B", 1, 0.0).replace("ATOM  ", "ANISOU", 1)
+            source.write_text(
+                anisou + "\n" + _atom(1, "B", 1, 0.0) + "\n" + _atom(2, "A", 1, 1.0) + "\nEND\n",
+                encoding="utf-8",
+            )
+            with self.assertRaisesRegex(RuntimeError, "appears before"):
                 stage22._copy_or_reorder_pdb(source, output, peptide_chain="B", target_chain="A")
 
 

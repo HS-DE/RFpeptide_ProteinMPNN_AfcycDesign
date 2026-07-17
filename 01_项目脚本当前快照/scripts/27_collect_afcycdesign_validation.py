@@ -9,7 +9,24 @@ from typing import Any, Iterable, Mapping, Sequence
 
 import numpy as np
 
-from common import assert_active_route_path, append_run_header, read_csv, resolve_path, rows_to_markdown, setup_logger, write_csv, write_markdown
+from common import (
+    ROUTE_PROVENANCE_FIELDS,
+    SOURCE_ROUTE_PROVENANCE_FIELDS,
+    add_route_provenance,
+    assert_active_route_path,
+    append_run_header,
+    load_route_manifest,
+    read_csv,
+    resolve_path,
+    route_provenance_fields,
+    rows_to_markdown,
+    setup_logger,
+    validate_route_project_config,
+    validate_row_route_provenance,
+    validate_source_route_provenance,
+    write_csv,
+    write_markdown,
+)
 from pdb_utils import parse_residues, residue_sequence
 
 
@@ -68,7 +85,7 @@ MODEL_FIELDS = [
     "confidence_pass",
     "recovery_success",
     "recovery_failure_reasons",
-]
+] + ROUTE_PROVENANCE_FIELDS + SOURCE_ROUTE_PROVENANCE_FIELDS
 
 CANDIDATE_FIELDS = [
     "stage5_candidate_id",
@@ -95,7 +112,7 @@ CANDIDATE_FIELDS = [
     "best_iptm",
     "candidate_validation_status",
     "notes",
-]
+] + ROUTE_PROVENANCE_FIELDS + SOURCE_ROUTE_PROVENANCE_FIELDS
 
 
 def _split_csv(value: str) -> list[str]:
@@ -439,6 +456,7 @@ def _model_row(
         "confidence_pass": str(confidence_pass).lower(),
         "recovery_success": str(geometry_recovery and confidence_pass).lower(),
         "recovery_failure_reasons": ";".join(failure_reasons),
+        **{field: candidate.get(field, "") for field in SOURCE_ROUTE_PROVENANCE_FIELDS},
     }
 
 
@@ -522,6 +540,7 @@ def _candidate_rows(
                 "best_iptm": best.get("iptm", ""),
                 "candidate_validation_status": status,
                 "notes": notes,
+                **{field: candidate.get(field, "") for field in SOURCE_ROUTE_PROVENANCE_FIELDS},
             }
         )
     return summaries
@@ -626,6 +645,7 @@ def main() -> int:
     parser = argparse.ArgumentParser(description="Parse Stage 5 AfCycDesign independent-recovery predictions.")
     parser.add_argument("--stage5-root", required=True)
     parser.add_argument("--stage0-root", required=True)
+    parser.add_argument("--project-config", required=True)
     parser.add_argument("--selected-candidates", default="")
     parser.add_argument("--contact-cutoff", type=float, default=5.0)
     parser.add_argument("--severe-clash-distance", type=float, default=1.2)
@@ -649,6 +669,9 @@ def main() -> int:
     stage0_root = _resolve_mixed_path(args.stage0_root)
     assert_active_route_path(stage5_root, "Stage 27 Stage 5 root")
     assert_active_route_path(stage0_root, "Stage 27 Stage 0 root")
+    route_manifest_path, route_manifest, route_manifest_sha256 = load_route_manifest(stage5_root.parent)
+    validate_route_project_config(args.project_config, route_manifest)
+    route_provenance = route_provenance_fields(route_manifest_path, route_manifest, route_manifest_sha256)
     candidate_manifest = stage5_root / "FGA_rfpeptides_stage5_candidate_manifest.csv"
     assert_active_route_path(candidate_manifest, "Stage 27 candidate manifest CSV")
     candidates = read_csv(candidate_manifest)
@@ -657,6 +680,16 @@ def main() -> int:
     selected = set(_split_csv(args.selected_candidates))
     if selected:
         candidates = [row for row in candidates if row.get("stage5_candidate_id", "") in selected]
+    for candidate in candidates:
+        validate_row_route_provenance(
+            candidate,
+            route_provenance,
+            f"Stage 27 candidate {candidate.get('stage5_candidate_id', '')}",
+        )
+        validate_source_route_provenance(
+            candidate,
+            f"Stage 27 candidate {candidate.get('stage5_candidate_id', '')}",
+        )
     mapping_csv = stage0_root / "00_target_inputs" / "RFpep_Site_2_crop_renumbering_mapping.csv"
     assert_active_route_path(mapping_csv, "Stage 27 Stage 0 mapping CSV")
     site_indices, hotspot_indices = _load_site_indices(mapping_csv)
@@ -695,7 +728,9 @@ def main() -> int:
                 except Exception as exc:
                     logger.error("Failed to parse %s: %s: %s", prediction_pdb, exc.__class__.__name__, exc)
 
+    add_route_provenance(model_rows, route_provenance)
     summaries = _candidate_rows(candidates, model_rows)
+    add_route_provenance(summaries, route_provenance)
     write_csv(stage5_root / "FGA_rfpeptides_stage5_model_validation.csv", model_rows, MODEL_FIELDS)
     write_csv(stage5_root / "FGA_rfpeptides_stage5_candidate_validation_summary.csv", summaries, CANDIDATE_FIELDS)
     write_markdown(

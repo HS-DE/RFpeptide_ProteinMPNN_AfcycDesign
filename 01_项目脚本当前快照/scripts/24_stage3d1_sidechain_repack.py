@@ -9,7 +9,23 @@ from collections import Counter
 from pathlib import Path
 from typing import Any, Iterable, Mapping, Sequence
 
-from common import assert_active_route_path, append_run_header, read_csv, resolve_path, rows_to_markdown, setup_logger, write_csv, write_markdown
+from common import (
+    ROUTE_PROVENANCE_FIELDS,
+    add_route_provenance,
+    assert_active_route_path,
+    append_run_header,
+    load_route_manifest,
+    read_csv,
+    resolve_path,
+    route_provenance_fields,
+    rows_to_markdown,
+    setup_logger,
+    validate_route_project_config,
+    validate_row_route_provenance,
+    write_csv,
+    write_markdown,
+    write_route_manifest,
+)
 from pdb_utils import parse_residues, residue_sequence
 
 
@@ -65,7 +81,7 @@ STAGE3D1_FIELDS = [
     "pass_stage3d1_qc",
     "stage3d1_failure_reasons",
     "notes",
-]
+] + ROUTE_PROVENANCE_FIELDS
 
 
 def _split_csv(value: str) -> list[str]:
@@ -439,6 +455,7 @@ def main() -> int:
     parser = argparse.ArgumentParser(description="Stage 3D-1 side-chain repack-only cleanup for ProteinMPNN-only outputs.")
     parser.add_argument("--stage0-root", required=True)
     parser.add_argument("--stage3-root", required=True)
+    parser.add_argument("--project-config", required=True)
     parser.add_argument("--output-root", default="", help="Defaults to --stage3-root.")
     parser.add_argument("--selected-backbones", required=True)
     parser.add_argument("--stage2-pass-csv", default="")
@@ -501,6 +518,12 @@ def main() -> int:
     assert_active_route_path(output_root, "Stage 24 output root", must_exist=False)
     assert_active_route_path(stage2_pass_csv, "Stage 24 Stage 2 pass CSV")
     assert_active_route_path(stage3c_qc_csv, "Stage 24 Stage 3C QC CSV")
+    route_manifest_path, route_manifest, route_manifest_sha256 = load_route_manifest(stage3_root)
+    validate_route_project_config(args.project_config, route_manifest)
+    source_route_provenance = route_provenance_fields(route_manifest_path, route_manifest, route_manifest_sha256)
+    if output_root.resolve() != stage3_root.resolve():
+        route_manifest_path, route_manifest, route_manifest_sha256 = write_route_manifest(output_root, route_manifest)
+    route_provenance = route_provenance_fields(route_manifest_path, route_manifest, route_manifest_sha256)
 
     selected_backbones = set(_split_csv(args.selected_backbones))
     if not selected_backbones:
@@ -532,6 +555,8 @@ def main() -> int:
         backbone_row = stage2_pass_lookup.get(backbone_id)
         if backbone_row is None:
             raise RuntimeError(f"Missing Stage 2 pass row for backbone: {backbone_id}")
+        validate_row_route_provenance(backbone_row, source_route_provenance, f"Stage 24 Stage 2 row {backbone_id}")
+        validate_row_route_provenance(input_row, source_route_provenance, f"Stage 24 Stage 3C row {backbone_id}")
         peptide_chain = str(input_row.get("peptide_chain") or backbone_row.get("peptide_chain") or "B").strip()
         target_chain = str(input_row.get("target_chain") or backbone_row.get("target_chain") or "A").strip()
         last_target_chain = target_chain
@@ -637,6 +662,7 @@ def main() -> int:
             }
         )
 
+    add_route_provenance(result_rows, route_provenance)
     pass_rows = [row for row in result_rows if row.get("pass_stage3d1_qc") == "true"]
     write_csv(output_dir / "FGA_rfpeptides_stage3D1_sidechain_repack_qc.csv", result_rows, STAGE3D1_FIELDS)
     write_csv(output_dir / "FGA_rfpeptides_stage3D1_sidechain_repack_qc_pass.csv", pass_rows, STAGE3D1_FIELDS)

@@ -8,7 +8,23 @@ import re
 import subprocess
 from typing import Any, Iterable, Mapping
 
-from common import assert_active_route_path, append_run_header, read_csv, resolve_path, rows_to_markdown, setup_logger, write_csv, write_markdown
+from common import (
+    ROUTE_PROVENANCE_FIELDS,
+    add_route_provenance,
+    assert_active_route_path,
+    canonical_json_sha256,
+    append_run_header,
+    load_active_route_config,
+    read_csv,
+    resolve_path,
+    route_provenance_fields,
+    rows_to_markdown,
+    setup_logger,
+    sha256_file,
+    write_csv,
+    write_markdown,
+    write_route_manifest,
+)
 
 
 JOB_FIELDS = [
@@ -47,7 +63,7 @@ JOB_FIELDS = [
     "command",
     "status",
     "notes",
-]
+] + ROUTE_PROVENANCE_FIELDS
 
 
 def _split_csv(value: str) -> list[str]:
@@ -454,6 +470,8 @@ def main() -> int:
     parser.add_argument("--input-root", required=True)
     parser.add_argument("--output-root", required=True)
     parser.add_argument("--selected-sites", required=True)
+    parser.add_argument("--batch-id", required=True)
+    parser.add_argument("--project-config", required=True)
     parser.add_argument("--stage0-summary-csv", default="")
     parser.add_argument("--rfpeptides-root", required=True)
     parser.add_argument("--num-designs", type=int, default=10)
@@ -476,6 +494,10 @@ def main() -> int:
         raise RuntimeError("--num-designs must be > 0")
     if args.length_min <= 0 or args.length_max < args.length_min:
         raise RuntimeError("--length-min/--length-max define an invalid length range")
+    if args.length_min < 12 or args.length_max > 24:
+        raise RuntimeError("Active head-to-tail route peptide lengths must stay within 12-24 aa")
+    if not str(args.batch_id).strip():
+        raise RuntimeError("--batch-id must not be empty")
     if args.diffuser_t <= 0:
         raise RuntimeError("--diffuser-t must be > 0")
     if not args.cyc_chains:
@@ -487,6 +509,8 @@ def main() -> int:
     backbones_root = output_root / "02_rfpeptides_backbones"
     logs_dir = output_root / "logs"
     rfpeptides_root = resolve_path(args.rfpeptides_root)
+    project_config = assert_active_route_path(args.project_config, "Stage 20 project config")
+    _, project_config_sha256, effective_project_config_sha256 = load_active_route_config(project_config)
     assert_active_route_path(input_root, "Stage 20 input root")
     assert_active_route_path(output_root, "Stage 20 output root", must_exist=False)
     assert_active_route_path(rfpeptides_root, "Stage 20 RFpeptides root")
@@ -537,12 +561,11 @@ def main() -> int:
                 f"{site_label} is not in the current Stage 1 pilot scope. "
                 "Current decision is to generate RFpep_Site_2 only."
             )
-        target_pdb = Path(str(row.get("target_pdb", "")))
-        if not target_pdb.exists():
-            raise RuntimeError(f"Missing Stage 0 target PDB for {site_label}: {target_pdb}")
-        mapping_csv = Path(str(row.get("crop_renumbering_mapping_csv", "")))
-        if not mapping_csv.exists():
-            raise RuntimeError(f"Missing Stage 0 mapping CSV for {site_label}: {mapping_csv}")
+        target_pdb = assert_active_route_path(row.get("target_pdb", ""), f"Stage 20 target PDB for {site_label}")
+        mapping_csv = assert_active_route_path(
+            row.get("crop_renumbering_mapping_csv", ""),
+            f"Stage 20 mapping CSV for {site_label}",
+        )
         hotspots = _normalize_hotspots(_split_csv(str(row.get("rfpeptides_hotspots", ""))))
         if not 3 <= len(hotspots) <= 6:
             raise RuntimeError(f"{site_label} has {len(hotspots)} hotspot(s); expected 3-6 for binder guidance.")
@@ -628,6 +651,50 @@ def main() -> int:
                 ),
             }
         )
+
+    stage0_sites = [
+        {
+            "site_label": str(row["site_label"]),
+            "target_pdb": str(row["stage0_target_pdb"]),
+            "target_pdb_sha256": str(row["stage0_target_pdb_sha256"]),
+            "mapping_csv": str(row["stage0_mapping_csv"]),
+            "mapping_csv_sha256": str(row["stage0_mapping_csv_sha256"]),
+            "normalized_hotspots": list(row["hotspots_list"]),
+            "normalized_hotspots_sha256": canonical_json_sha256(list(row["hotspots_list"])),
+        }
+        for row in job_rows
+    ]
+    manifest_path, route_manifest, manifest_sha256 = write_route_manifest(
+        output_root,
+        {
+            "batch_id": str(args.batch_id).strip(),
+            "site_labels": [str(row["site_label"]) for row in job_rows],
+            "protocol_peptide_length_min": 12,
+            "protocol_peptide_length_max": 24,
+            "run_peptide_length_min": args.length_min,
+            "run_peptide_length_max": args.length_max,
+            "num_designs_requested": args.num_designs,
+            "project_config": str(project_config),
+            "project_config_sha256": project_config_sha256,
+            "effective_project_config_sha256": effective_project_config_sha256,
+            "stage0_sites": stage0_sites,
+            "rfpeptides_runtime": {
+                "root": str(rfpeptides_root),
+                "git_commit": runtime_git_commit,
+                "source_sha256": runtime_hashes,
+            },
+            "stage1_protocol": {
+                "config_name": args.config_name,
+                "diffuser_t": args.diffuser_t,
+                "cyclic": True,
+                "cyc_chains": args.cyc_chains,
+                "allow_potentials": bool(args.allow_potentials),
+                "extra_overrides": list(args.extra_override),
+            },
+        },
+    )
+    provenance = route_provenance_fields(manifest_path, route_manifest, manifest_sha256)
+    add_route_provenance(job_rows, provenance)
 
     run_script = jobs_dir / args.run_script_name
     run_script_text = _run_script_text(

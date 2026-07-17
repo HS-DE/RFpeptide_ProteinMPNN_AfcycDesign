@@ -1,0 +1,102 @@
+status: archived_legacy
+production_use: false
+route_name: legacy_disulfide
+
+project:
+  name: fga_cyclic_peptide_design
+  target_gene: FGA
+  target_uniprot: P02671
+  target_description: "Human fibrinogen alpha chain; design should focus on FGA regions exposed in native fibrinogen."
+
+input:
+  excel_file: "data/input/高丰度蛋白信息.xlsx"
+  gene_column: Gene
+  uniprot_column: UniprotID
+  sequence_column: Sequence
+  abundance_column: estimated_ng_per_ml
+
+target_regions:
+  full_length:
+    start: 1
+    end: 866
+    use_for_design: false
+    priority: record
+    note: "Full-length precursor; keep for record only."
+  extracellular:
+    start: 20
+    end: 866
+    use_for_design: true
+    priority: secondary
+    note: "Signal peptide removed."
+  main_chain:
+    start: 36
+    end: 866
+    use_for_design: true
+    preferred: true
+    priority: preferred
+    note: "Avoids fibrinopeptide A as primary target."
+
+structures:
+  primary_pdb: 3GHG
+  primary_pdb_file: data/structures/raw/3GHG.pdb
+  cleaned_pdb_file: data/structures/prepared/fibrinogen_3GHG_clean.pdb
+  alphafold_pdb_file: data/structures/raw/AF-P02671-F1-model_v4.pdb
+  prefer_native_complex: true
+
+peptide_design:
+  scheme: A
+  cyclization: Cys-Cys disulfide
+  final_format_prefix: Biotin-PEG4-GSG-
+  final_format_suffix: -NH2
+  core_length_min: 10
+  core_length_max: 18
+  preferred_core_lengths: [12, 14, 16]
+  terminal_residue: C
+  forbid_internal_cys: true
+
+generation:
+  total_raw_designs_target: 5000
+  length_distribution:
+    10: 0.10
+    12: 0.30
+    14: 0.30
+    16: 0.20
+    18: 0.10
+
+sequence_filters:
+  max_hydrophobic_run: 4
+  net_charge_min: -3
+  net_charge_max: 3
+  max_w_count: 1
+  max_m_count: 1
+  forbid_low_complexity: true
+  forbid_poly_basic: true
+  forbid_poly_acidic: true
+
+complex_prediction:
+  run_prediction: true
+  prediction_engines: [colabfold, boltz2_optional]
+  seeds_per_candidate: 5
+  require_patch_consistency: true
+
+scoring_thresholds:
+  max_interface_pae: 10.0
+  min_peptide_plddt: 70.0
+  min_interface_contacts: 8
+  min_iptm_soft: 0.50
+  min_iptm_preferred: 0.65
+  require_cys_geometry_pass: true
+
+negative_screen:
+  enabled: true
+  targets: [ALB, APOA1, TF, A2M, C3, IGG_FC]
+  purpose: "Remove obviously sticky non-specific peptides."
+
+ranking:
+  top_n_candidates: 50
+  top_n_synthesis_priority: 10
+
+report:
+  language: zh-CN
+  include_warnings: true
+  do_not_claim_experimental_validation: true

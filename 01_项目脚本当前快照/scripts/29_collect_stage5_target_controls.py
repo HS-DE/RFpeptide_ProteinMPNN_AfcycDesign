@@ -9,7 +9,22 @@ from typing import Any, Mapping, Sequence
 
 import numpy as np
 
-from common import assert_active_route_path, append_run_header, read_csv, resolve_path, rows_to_markdown, setup_logger, write_csv, write_markdown
+from common import (
+    ROUTE_PROVENANCE_FIELDS,
+    add_route_provenance,
+    assert_active_route_path,
+    append_run_header,
+    load_route_manifest,
+    read_csv,
+    resolve_path,
+    route_provenance_fields,
+    rows_to_markdown,
+    setup_logger,
+    validate_route_project_config,
+    validate_row_route_provenance,
+    write_csv,
+    write_markdown,
+)
 from pdb_utils import parse_residues, residue_sequence
 
 
@@ -37,7 +52,7 @@ MODEL_FIELDS = [
     "ptm",
     "target_recovery_pass",
     "target_recovery_failure_reasons",
-]
+] + ROUTE_PROVENANCE_FIELDS
 
 GROUP_FIELDS = [
     "control_group",
@@ -56,7 +71,7 @@ GROUP_FIELDS = [
     "median_hotspot_mean_pLDDT_100",
     "status",
     "notes",
-]
+] + ROUTE_PROVENANCE_FIELDS
 
 
 def _resolve_mixed_path(value: str | Path) -> Path:
@@ -324,6 +339,7 @@ def main() -> int:
     parser = argparse.ArgumentParser(description="Collect Stage 5 target-only recovery controls.")
     parser.add_argument("--control-root", required=True)
     parser.add_argument("--stage0-root", required=True)
+    parser.add_argument("--project-config", required=True)
     parser.add_argument("--max-target-global-rmsd", type=float, default=3.0)
     parser.add_argument("--max-site2-local-rmsd", type=float, default=2.0)
     parser.add_argument("--max-hotspot-local-rmsd", type=float, default=2.0)
@@ -337,6 +353,9 @@ def main() -> int:
     stage0_root = _resolve_mixed_path(args.stage0_root)
     assert_active_route_path(control_root, "Stage 29 target-control root")
     assert_active_route_path(stage0_root, "Stage 29 Stage 0 root")
+    route_manifest_path, route_manifest, route_manifest_sha256 = load_route_manifest(control_root.parent)
+    validate_route_project_config(args.project_config, route_manifest)
+    route_provenance = route_provenance_fields(route_manifest_path, route_manifest, route_manifest_sha256)
     control_manifest = control_root / "FGA_rfpeptides_stage5_target_control_manifest.csv"
     jobs_csv = control_root / "inputs" / "FGA_rfpeptides_stage5_target_control_jobs.csv"
     assert_active_route_path(control_manifest, "Stage 29 target-control manifest CSV")
@@ -345,6 +364,10 @@ def main() -> int:
     jobs = read_csv(jobs_csv)
     if not controls or not jobs:
         raise RuntimeError(f"Missing target-control manifest or jobs CSV: {control_root}")
+    for row in controls:
+        validate_row_route_provenance(row, route_provenance, "Stage 29 target-control manifest row")
+    for row in jobs:
+        validate_row_route_provenance(row, route_provenance, "Stage 29 target-control job row")
 
     reference_pdb = stage0_root / "00_target_inputs" / "RFpep_Site_2_target.pdb"
     assert_active_route_path(reference_pdb, "Stage 29 Stage 0 reference PDB")
@@ -390,7 +413,9 @@ def main() -> int:
             except Exception as exc:
                 logger.error("Failed to parse %s: %s: %s", prediction_pdb, exc.__class__.__name__, exc)
 
+    add_route_provenance(model_rows, route_provenance)
     groups = _group_rows(controls, model_rows)
+    add_route_provenance(groups, route_provenance)
     write_csv(control_root / "FGA_rfpeptides_stage5_target_control_model_results.csv", model_rows, MODEL_FIELDS)
     write_csv(control_root / "FGA_rfpeptides_stage5_target_control_group_summary.csv", groups, GROUP_FIELDS)
     write_markdown(

@@ -1,0 +1,107 @@
+status: active
+production_use: true
+
+route:
+  name: rfpeptides_head_to_tail
+  route_protocol_version: rfpeptides_head_to_tail_v1
+  hotspot_mapping_version: site2_stage0_trb_tensor_pdb_complex_global_v1
+
+project:
+  name: fga_cyclic_peptide_design
+  target_gene: FGA
+  target_uniprot: P02671
+  target_description: "Human fibrinogen alpha chain; active route targets RFpep_Site_2 in native structural context."
+
+input:
+  excel_file: "data/input/高丰度蛋白信息.xlsx"
+  gene_column: Gene
+  uniprot_column: UniprotID
+  sequence_column: Sequence
+  abundance_column: estimated_ng_per_ml
+
+target_regions:
+  full_length:
+    start: 1
+    end: 866
+    use_for_design: false
+    priority: record
+  extracellular:
+    start: 20
+    end: 866
+    use_for_design: true
+    priority: secondary
+  main_chain:
+    start: 36
+    end: 866
+    use_for_design: true
+    preferred: true
+    priority: preferred
+
+structures:
+  primary_pdb: 3GHG
+  primary_pdb_file: data/structures/raw/3GHG.pdb
+  cleaned_pdb_file: data/structures/prepared/fibrinogen_3GHG_clean.pdb
+  alphafold_pdb_file: data/structures/raw/AF-P02671-F1-model_v4.pdb
+  prefer_native_complex: true
+
+peptide_design:
+  cyclization: head_to_tail_amide
+  length_min: 12
+  length_max: 24
+  preferred_lengths: [12, 14, 16, 18, 20, 22, 24]
+  required_terminal_residue: null
+  terminal_residue: null
+  omit_aas: "CX"
+  require_cys_pair: false
+  forbid_internal_cys: true
+
+pipeline:
+  stages:
+    - RFpeptides
+    - ProteinMPNN_only
+    - sidechain_repack_only
+    - Rosetta_score_only
+    - AfCycDesign
+
+generation:
+  stage1_generator: RFpeptides
+  diffuser_timesteps: 50
+  write_trajectory: false
+  potentials_enabled: false
+
+sequence_filters:
+  max_hydrophobic_run: 4
+  net_charge_min: -3
+  net_charge_max: 3
+  max_w_count: 1
+  max_m_count: 1
+  forbid_low_complexity: true
+  forbid_poly_basic: true
+  forbid_poly_acidic: true
+
+complex_prediction:
+  primary_engine: AfCycDesign
+  seeds_per_candidate: 5
+  require_site2_recovery: true
+  require_hotspot_recovery: true
+
+scoring_thresholds:
+  max_interface_pae: 15.0
+  min_peptide_plddt: 70.0
+  min_interface_contacts: 1
+  require_cys_geometry_pass: false
+  require_head_to_tail_geometry_pass: true
+
+negative_screen:
+  enabled: true
+  targets: [ALB, APOA1, TF, A2M, C3, IGG_FC]
+  purpose: "Remove obviously sticky non-specific peptides after structural recovery."
+
+ranking:
+  top_n_candidates: 50
+  top_n_synthesis_priority: 10
+
+report:
+  language: zh-CN
+  include_warnings: true
+  do_not_claim_experimental_validation: true

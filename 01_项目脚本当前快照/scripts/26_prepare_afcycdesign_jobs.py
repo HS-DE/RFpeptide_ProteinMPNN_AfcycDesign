@@ -10,7 +10,24 @@ from collections import defaultdict
 from pathlib import Path
 from typing import Any, Iterable, Mapping
 
-from common import assert_active_route_path, append_run_header, read_csv, resolve_path, rows_to_markdown, setup_logger, write_csv, write_markdown
+from common import (
+    ROUTE_PROVENANCE_FIELDS,
+    SOURCE_ROUTE_PROVENANCE_FIELDS,
+    assert_active_route_path,
+    canonical_json_sha256,
+    append_run_header,
+    load_route_manifest,
+    read_csv,
+    resolve_path,
+    route_provenance_fields,
+    rows_to_markdown,
+    setup_logger,
+    validate_route_project_config,
+    validate_row_route_provenance,
+    write_csv,
+    write_markdown,
+    write_route_manifest,
+)
 
 
 COLABDESIGN_GAMMA_COMMIT = "5ab4efaba2321a6c3c314b82d2fff8e0241f5c2d"
@@ -96,7 +113,7 @@ MANIFEST_FIELDS = [
     "mlm_replace_fraction",
     "prediction_job_count",
     "status",
-]
+] + ROUTE_PROVENANCE_FIELDS + SOURCE_ROUTE_PROVENANCE_FIELDS
 
 JOB_FIELDS = [
     "stage5_job_id",
@@ -127,7 +144,7 @@ JOB_FIELDS = [
     "requested_recycles",
     "forward_passes",
     "status",
-]
+] + ROUTE_PROVENANCE_FIELDS + SOURCE_ROUTE_PROVENANCE_FIELDS
 
 
 def _safe_token(value: str) -> str:
@@ -299,6 +316,41 @@ def _eligible_stage4_rows(rows: Iterable[Mapping[str, str]], batch: str) -> list
     return eligible
 
 
+def _source_route_compatibility_sha256(manifest: Mapping[str, Any]) -> str:
+    stage0_sites = []
+    for source_site in manifest["stage0_sites"]:
+        site = dict(source_site)
+        site.pop("target_pdb", None)
+        site.pop("mapping_csv", None)
+        stage0_sites.append(site)
+    return canonical_json_sha256(
+        {
+            "route_name": manifest["route_name"],
+            "route_protocol_version": manifest["route_protocol_version"],
+            "hotspot_mapping_version": manifest["hotspot_mapping_version"],
+            "cyclization": manifest["cyclization"],
+            "project_config_sha256": manifest["project_config_sha256"],
+            "effective_project_config_sha256": manifest["effective_project_config_sha256"],
+            "site_labels": manifest["site_labels"],
+            "stage0_sites": stage0_sites,
+        }
+    )
+
+
+def _validate_source_route_set(records: Iterable[Mapping[str, Any]]) -> str:
+    rows = list(records)
+    run_ids = [str(row["manifest"]["run_id"]) for row in rows]
+    manifest_hashes = [str(row["manifest_sha256"]) for row in rows]
+    if len(run_ids) != len(set(run_ids)):
+        raise RuntimeError("Stage 26 source routes contain a duplicate run_id")
+    if len(manifest_hashes) != len(set(manifest_hashes)):
+        raise RuntimeError("Stage 26 source routes contain a duplicate manifest SHA-256")
+    compatibility = {_source_route_compatibility_sha256(row["manifest"]) for row in rows}
+    if len(compatibility) != 1:
+        raise RuntimeError("Stage 26 source routes are not provenance-compatible")
+    return next(iter(compatibility))
+
+
 def _select_candidates(rows: list[dict[str, Any]], candidate_count: int) -> list[dict[str, Any]]:
     by_batch_backbone: dict[tuple[str, str], list[dict[str, Any]]] = defaultdict(list)
     for row in rows:
@@ -390,11 +442,6 @@ def _selection_reason(row: Mapping[str, Any]) -> str:
     ddg = row.get("ddg_proxy_no_repack", "")
     site_contacts = row.get("num_target_site_contacts", "")
     hotspot_contacts = row.get("num_hotspot_contacts", "")
-    if backbone.endswith("5529"):
-        return (
-            "Batch02 second strict Stage 2 backbone; Stage 4 hard QC passed with strong site/hotspot contact recovery, "
-            f"but its no-repack energy proxy is weaker (ddg={ddg}). Included for backbone diversity and as a validation control."
-        )
     if role == "sequence_sensitivity_test":
         return f"Second sequence for {backbone}; included only to test sequence sensitivity on the same backbone."
     return (
@@ -589,7 +636,8 @@ Output directory:
 
 ## Selection Rules
 
-- Both batch01 and batch02 are represented.
+- Every supplied source batch is represented when enough eligible candidates
+  are available.
 - Distinct backbone families are preferred over near-duplicate sequences.
 - A selected backbone has one representative by default and at most two
   sequences. A second sequence is allowed only as a sequence-sensitivity test.
@@ -602,10 +650,9 @@ Output directory:
 
 {count_lines}
 
-Batch02 backbone `RFpep_Site_2_5529` has qualified Stage 4 candidates. Its best
-row has strong site/hotspot contact recovery but a much weaker no-repack energy
-proxy than `RFpep_Site_2_1518`; it is included to test backbone diversity, not
-because it is an energy-ranked lead.
+Backbone coverage and candidate counts are derived from the supplied source
+route manifests and the current Stage 4 hard-QC tables; no batch or backbone is
+hard-coded into this preparation step.
 
 ## Selected Candidates
 
@@ -846,6 +893,7 @@ def main() -> int:
     )
     parser.add_argument("--stage0-root", required=True)
     parser.add_argument("--output-root", required=True)
+    parser.add_argument("--project-config", required=True)
     parser.add_argument("--candidate-count", type=int, default=5)
     parser.add_argument("--seeds-per-candidate", type=int, default=5)
     parser.add_argument("--models-per-seed", type=int, default=5)
@@ -885,12 +933,45 @@ def main() -> int:
     if len(source_roots) != len({str(path.resolve()) for path in source_roots}):
         raise RuntimeError("--source-run-root contains duplicate source roots")
     all_rows: list[dict[str, Any]] = []
+    source_manifests: list[dict[str, Any]] = []
+    source_route_records: list[dict[str, Any]] = []
+    loaded_source_manifests: list[dict[str, Any]] = []
     for root in source_roots:
         assert_active_route_path(root, "Stage 26 source run root")
-        batch = root.name
+        manifest_path, source_manifest, source_manifest_sha256 = load_route_manifest(root)
+        validate_route_project_config(args.project_config, source_manifest)
+        source_run_id = str(source_manifest["run_id"])
+        batch = str(source_manifest["batch_id"])
+        source_route_records.append(
+            {"manifest": source_manifest, "manifest_sha256": source_manifest_sha256}
+        )
+        source_provenance = route_provenance_fields(manifest_path, source_manifest, source_manifest_sha256)
         stage4_csv = root / "06_rosetta_scoring" / "FGA_rfpeptides_stage4_rosetta_interface_scores_pass.csv"
         assert_active_route_path(stage4_csv, f"Stage 26 Stage 4 pass CSV for {batch}")
-        all_rows.extend(_eligible_stage4_rows(_read_required_csv(stage4_csv), batch))
+        source_rows = _read_required_csv(stage4_csv)
+        for row in source_rows:
+            validate_row_route_provenance(row, source_provenance, f"Stage 26 Stage 4 row in {batch}")
+        eligible_rows = _eligible_stage4_rows(source_rows, batch)
+        for row in eligible_rows:
+            row.update(
+                {
+                    "source_run_id": source_run_id,
+                    "source_batch_id": batch,
+                    "source_route_manifest": str(manifest_path),
+                    "source_route_manifest_sha256": source_manifest_sha256,
+                }
+            )
+        all_rows.extend(eligible_rows)
+        source_manifests.append(
+            {
+                "run_id": source_run_id,
+                "batch_id": batch,
+                "manifest_path": str(manifest_path),
+                "manifest_sha256": source_manifest_sha256,
+            }
+        )
+        loaded_source_manifests.append(source_manifest)
+    _validate_source_route_set(source_route_records)
     if not all_rows:
         raise RuntimeError("No eligible Stage 4 hard-QC rows were found.")
 
@@ -945,6 +1026,32 @@ def main() -> int:
         "requested_recycles": args.recycles,
     }
     protocol_hash = _protocol_hash(protocol_payload)
+    base_manifest = loaded_source_manifests[0]
+    merged_source_identity = canonical_json_sha256(sorted(source_manifests, key=lambda item: item["run_id"]))
+    merged_manifest_path, merged_manifest, merged_manifest_sha256 = write_route_manifest(
+        output_root,
+        {
+            "batch_id": f"merged_{merged_source_identity[:12]}",
+            "site_labels": list(base_manifest["site_labels"]),
+            "protocol_peptide_length_min": int(base_manifest["protocol_peptide_length_min"]),
+            "protocol_peptide_length_max": int(base_manifest["protocol_peptide_length_max"]),
+            "run_peptide_length_min": min(int(item["run_peptide_length_min"]) for item in loaded_source_manifests),
+            "run_peptide_length_max": max(int(item["run_peptide_length_max"]) for item in loaded_source_manifests),
+            "num_designs_requested": sum(int(item["num_designs_requested"]) for item in loaded_source_manifests),
+            "project_config": base_manifest["project_config"],
+            "project_config_sha256": base_manifest["project_config_sha256"],
+            "effective_project_config_sha256": base_manifest["effective_project_config_sha256"],
+            "stage0_sites": list(base_manifest["stage0_sites"]),
+            "source_route_manifests": sorted(source_manifests, key=lambda item: item["run_id"]),
+            "merged_source_identity_sha256": merged_source_identity,
+            "stage5_protocol": protocol_payload,
+        },
+    )
+    route_provenance = route_provenance_fields(
+        merged_manifest_path,
+        merged_manifest,
+        merged_manifest_sha256,
+    )
     _write_text_lf(target_dir / "RFpep_Site_2_target.fasta", f">RFpep_Site_2_target\n{target_sequence}")
 
     runner = project_root / "scripts" / "external" / "run_afcycdesign_independent_recovery.py"
@@ -1055,6 +1162,8 @@ def main() -> int:
                 "mlm_replace_fraction": mlm_replace_fraction,
                 "prediction_job_count": args.seeds_per_candidate,
                 "status": "prepared_pending_protocol_preflight_and_manual_review",
+                **{key: row[key] for key in SOURCE_ROUTE_PROVENANCE_FIELDS},
+                **route_provenance,
             }
         )
 
@@ -1095,6 +1204,8 @@ def main() -> int:
                 "design_pose_for_posthoc_comparison": _to_wsl_path(staged_pdb),
                 "prediction_output_dir": _to_wsl_path(output_path),
                 "colabdesign_commit": COLABDESIGN_GAMMA_COMMIT,
+                **{key: row[key] for key in SOURCE_ROUTE_PROVENANCE_FIELDS},
+                **route_provenance,
             }
             _write_text_lf(job_spec, json.dumps(spec, indent=2, sort_keys=True))
 
@@ -1142,6 +1253,8 @@ def main() -> int:
                     "requested_recycles": args.recycles,
                     "forward_passes": args.recycles + 1,
                     "status": "prepared_not_run",
+                    **{key: row[key] for key in SOURCE_ROUTE_PROVENANCE_FIELDS},
+                    **route_provenance,
                 }
             )
 

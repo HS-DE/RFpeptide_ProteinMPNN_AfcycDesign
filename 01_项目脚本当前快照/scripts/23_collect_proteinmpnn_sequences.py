@@ -8,7 +8,23 @@ from collections import Counter
 from pathlib import Path
 from typing import Any, Iterable, Mapping, Sequence
 
-from common import assert_active_route_path, append_run_header, read_csv, resolve_path, rows_to_markdown, setup_logger, write_csv, write_fasta, write_markdown
+from common import (
+    ROUTE_PROVENANCE_FIELDS,
+    assert_active_route_path,
+    append_run_header,
+    load_route_manifest,
+    read_csv,
+    resolve_path,
+    route_provenance_fields,
+    rows_to_markdown,
+    setup_logger,
+    validate_route_project_config,
+    validate_row_route_provenance,
+    write_csv,
+    write_fasta,
+    write_markdown,
+    write_route_manifest,
+)
 from pdb_utils import ca_coord, centroid, distance, parse_residues, residue_sequence
 
 
@@ -66,7 +82,7 @@ STAGE3C_FIELDS = [
     "pass_stage3c_qc",
     "qc_failure_reasons",
     "qc_notes",
-]
+] + ROUTE_PROVENANCE_FIELDS
 
 
 def _split_csv(value: str) -> list[str]:
@@ -908,6 +924,7 @@ def main() -> int:
     parser = argparse.ArgumentParser(description="Collect and QC Stage 3B ProteinMPNN sequence-design outputs.")
     parser.add_argument("--stage0-root", required=True)
     parser.add_argument("--stage3-root", required=True)
+    parser.add_argument("--project-config", required=True)
     parser.add_argument("--output-root", default="", help="Defaults to --stage3-root.")
     parser.add_argument(
         "--stage3-mode",
@@ -967,6 +984,12 @@ def main() -> int:
     assert_active_route_path(output_root, "Stage 23 output root", must_exist=False)
     assert_active_route_path(stage2_pass_csv, "Stage 23 Stage 2 pass CSV")
     assert_active_route_path(stage3_jobs_csv, "Stage 23 Stage 3 jobs CSV")
+    route_manifest_path, route_manifest, route_manifest_sha256 = load_route_manifest(stage3_root)
+    validate_route_project_config(args.project_config, route_manifest)
+    source_route_provenance = route_provenance_fields(route_manifest_path, route_manifest, route_manifest_sha256)
+    if output_root.resolve() != stage3_root.resolve():
+        route_manifest_path, route_manifest, route_manifest_sha256 = write_route_manifest(output_root, route_manifest)
+    route_provenance = route_provenance_fields(route_manifest_path, route_manifest, route_manifest_sha256)
 
     stage2_pass_lookup = _strict_lookup_rows(_read_required_csv(stage2_pass_csv), "design_id", "Stage 2 pass")
     stage3_job_lookup = _strict_lookup_rows(_read_required_csv(stage3_jobs_csv), "design_id", "Stage 3 job")
@@ -988,6 +1011,7 @@ def main() -> int:
             raise RuntimeError(f"Selected backbone not found in Stage 2 pass CSV: {backbone_id}")
         if str(backbone_row.get("pass_backbone_qc", "")).strip().lower() != "true":
             raise RuntimeError(f"Selected backbone is not marked pass_backbone_qc=true: {backbone_id}")
+        validate_row_route_provenance(backbone_row, source_route_provenance, f"Stage 23 Stage 2 row {backbone_id}")
 
         site_label = str(backbone_row.get("site_label", ""))
         site_mapping_csv = stage0_root / "00_target_inputs" / f"{_safe_token(site_label)}_crop_renumbering_mapping.csv"
@@ -1000,6 +1024,7 @@ def main() -> int:
         job_row = stage3_job_lookup.get(backbone_id)
         if job_row is None:
             raise RuntimeError(f"Selected backbone has no Stage 3 job row: {backbone_id}")
+        validate_row_route_provenance(job_row, source_route_provenance, f"Stage 23 Stage 3 job {backbone_id}")
         _validate_stage3_job_row(
             backbone_id=backbone_id,
             backbone_row=backbone_row,
@@ -1012,6 +1037,7 @@ def main() -> int:
         output_pdb_dir = _resolve_mixed_path(output_pdb_dir_text)
         assert_active_route_path(output_pdb_dir, f"Stage 23 output PDB directory for {backbone_id}")
         provenance = _stage3_job_provenance(job_row)
+        provenance.update(route_provenance)
         relaxed_pdbs = _relaxed_pdbs_for_backbone(output_pdb_dir, backbone_id)
         if not relaxed_pdbs:
             missing_row = dict(backbone_row)

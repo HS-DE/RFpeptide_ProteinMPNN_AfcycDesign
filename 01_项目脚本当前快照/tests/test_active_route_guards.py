@@ -50,18 +50,18 @@ class ActiveRoutePathTests(unittest.TestCase):
 
 class RequiredCliInputTests(unittest.TestCase):
     REQUIRED_OPTIONS = {
-        "20_make_rfpeptides_article_jobs.py": ["--input-root", "--output-root", "--selected-sites", "--rfpeptides-root"],
-        "21_collect_rfpeptides_backbones.py": ["--stage0-root", "--stage1-root", "--selected-sites"],
-        "22_prepare_proteinmpnn_jobs.py": ["--stage2-root", "--selected-backbones", "--dl-binder-design-root"],
-        "23_collect_proteinmpnn_sequences.py": ["--stage0-root", "--stage3-root", "--selected-backbones", "--stage3-jobs-csv"],
-        "24_stage3d1_sidechain_repack.py": ["--stage0-root", "--stage3-root", "--selected-backbones"],
-        "25_stage4_rosetta_interface_scoring.py": ["--stage0-root", "--stage3-root", "--selected-backbones"],
-        "26_prepare_afcycdesign_jobs.py": ["--source-run-root", "--stage0-root", "--output-root"],
-        "27_collect_afcycdesign_validation.py": ["--stage5-root", "--stage0-root"],
-        "28_prepare_stage5_target_controls.py": ["--stage0-root", "--output-root"],
-        "29_collect_stage5_target_controls.py": ["--control-root", "--stage0-root"],
-        "30_prepare_stage5b_target_conditioned_jobs.py": ["--stage5a-root", "--stage0-root", "--output-root"],
-        "31_collect_stage5b_validation.py": ["--stage5b-root", "--stage0-root"],
+        "20_make_rfpeptides_article_jobs.py": ["--input-root", "--output-root", "--selected-sites", "--rfpeptides-root", "--batch-id", "--project-config"],
+        "21_collect_rfpeptides_backbones.py": ["--stage0-root", "--stage1-root", "--selected-sites", "--project-config"],
+        "22_prepare_proteinmpnn_jobs.py": ["--stage2-root", "--selected-backbones", "--dl-binder-design-root", "--project-config"],
+        "23_collect_proteinmpnn_sequences.py": ["--stage0-root", "--stage3-root", "--selected-backbones", "--stage3-jobs-csv", "--project-config"],
+        "24_stage3d1_sidechain_repack.py": ["--stage0-root", "--stage3-root", "--selected-backbones", "--project-config"],
+        "25_stage4_rosetta_interface_scoring.py": ["--stage0-root", "--stage3-root", "--selected-backbones", "--project-config"],
+        "26_prepare_afcycdesign_jobs.py": ["--source-run-root", "--stage0-root", "--output-root", "--project-config"],
+        "27_collect_afcycdesign_validation.py": ["--stage5-root", "--stage0-root", "--project-config"],
+        "28_prepare_stage5_target_controls.py": ["--source-run-root", "--stage0-root", "--output-root", "--project-config"],
+        "29_collect_stage5_target_controls.py": ["--control-root", "--stage0-root", "--project-config"],
+        "30_prepare_stage5b_target_conditioned_jobs.py": ["--stage5a-root", "--stage0-root", "--output-root", "--project-config"],
+        "31_collect_stage5b_validation.py": ["--stage5b-root", "--stage0-root", "--project-config"],
     }
 
     def test_all_production_entrypoints_require_upstream_roots(self) -> None:
@@ -86,6 +86,33 @@ class RequiredCliInputTests(unittest.TestCase):
                         required_found.add(option_node.value)
                 for option in required_options:
                     self.assertIn(option, required_found)
+
+    def test_all_production_entrypoints_use_shared_route_guards(self) -> None:
+        for filename in self.REQUIRED_OPTIONS:
+            with self.subTest(script=filename):
+                tree = ast.parse((SCRIPTS_DIR / filename).read_text(encoding="utf-8"), filename=filename)
+                called_names = {
+                    node.func.id
+                    for node in ast.walk(tree)
+                    if isinstance(node, ast.Call) and isinstance(node.func, ast.Name)
+                }
+                self.assertIn("assert_active_route_path", called_names)
+                self.assertTrue(
+                    {"load_active_route_config", "validate_route_project_config"} & called_names,
+                    f"{filename} does not use the strict active-route config loader",
+                )
+                self.assertTrue(
+                    {"load_route_manifest", "write_route_manifest"} & called_names,
+                    f"{filename} does not read or create a route manifest",
+                )
+
+    def test_no_historical_run_identity_remains_in_active_scripts(self) -> None:
+        forbidden = ["n1000", "rfpep_site_2_0007", "batch01", "batch02", "202606", "5529"]
+        for filename in self.REQUIRED_OPTIONS:
+            text = (SCRIPTS_DIR / filename).read_text(encoding="utf-8").casefold()
+            for token in forbidden:
+                with self.subTest(script=filename, token=token):
+                    self.assertNotIn(token, text)
 
 
 if __name__ == "__main__":

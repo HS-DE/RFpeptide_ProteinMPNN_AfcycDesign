@@ -11,7 +11,22 @@ from collections import Counter
 from pathlib import Path
 from typing import Any, Iterable, Mapping, Sequence
 
-from common import assert_active_route_path, append_run_header, read_csv, resolve_path, rows_to_markdown, setup_logger, write_csv, write_markdown
+from common import (
+    ROUTE_PROVENANCE_FIELDS,
+    assert_active_route_path,
+    append_run_header,
+    load_route_manifest,
+    read_csv,
+    resolve_path,
+    route_provenance_fields,
+    rows_to_markdown,
+    setup_logger,
+    validate_route_project_config,
+    validate_row_route_provenance,
+    write_csv,
+    write_markdown,
+    write_route_manifest,
+)
 from pdb_utils import ca_coord, centroid, distance, parse_residues, residue_sequence
 
 
@@ -78,7 +93,7 @@ QC_FIELDS = [
     "pass_backbone_qc",
     "qc_failure_reasons",
     "qc_notes",
-]
+] + ROUTE_PROVENANCE_FIELDS
 
 
 def _split_csv(value: str) -> list[str]:
@@ -1302,6 +1317,7 @@ def main() -> int:
     parser = argparse.ArgumentParser(description="Collect and QC RFpeptides Stage 1 backbone outputs before sequence design.")
     parser.add_argument("--stage0-root", required=True)
     parser.add_argument("--stage1-root", required=True)
+    parser.add_argument("--project-config", required=True)
     parser.add_argument("--output-root", default="", help="Defaults to --stage1-root.")
     parser.add_argument("--output-subdir", default="03_backbone_qc")
     parser.add_argument("--selected-sites", required=True)
@@ -1352,6 +1368,12 @@ def main() -> int:
     assert_active_route_path(stage0_root, "Stage 21 Stage 0 root")
     assert_active_route_path(stage1_root, "Stage 21 Stage 1 root")
     assert_active_route_path(output_root, "Stage 21 output root", must_exist=False)
+    route_manifest_path, route_manifest, route_manifest_sha256 = load_route_manifest(stage1_root)
+    validate_route_project_config(args.project_config, route_manifest)
+    source_route_provenance = route_provenance_fields(route_manifest_path, route_manifest, route_manifest_sha256)
+    if output_root.resolve() != stage1_root.resolve():
+        route_manifest_path, route_manifest, route_manifest_sha256 = write_route_manifest(output_root, route_manifest)
+    route_provenance = route_provenance_fields(route_manifest_path, route_manifest, route_manifest_sha256)
     output_dir = output_root / args.output_subdir
     stage0_summary_csv = (
         _resolve_mixed_path(args.stage0_summary_csv)
@@ -1383,6 +1405,7 @@ def main() -> int:
             raise RuntimeError(f"Selected site not found in Stage 0 summary: {selected_id}")
         if job_row is None:
             raise RuntimeError(f"Selected site not found in Stage 1 jobs table: {selected_id}")
+        validate_row_route_provenance(job_row, source_route_provenance, f"Stage 21 job for {selected_id}")
 
         site_label = str(site_row.get("site_label") or selected_id)
         site_id = str(site_row.get("site_id", ""))
@@ -1452,6 +1475,7 @@ def main() -> int:
                 min_hotspot_contacts=args.min_hotspot_contacts,
                 allow_near_pass=args.allow_near_pass,
             )
+            qc_row.update(route_provenance)
             all_rows.append(qc_row)
             if str(qc_row.get("target_chain", "")):
                 last_target_chain = str(qc_row["target_chain"])

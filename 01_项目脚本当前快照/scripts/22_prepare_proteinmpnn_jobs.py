@@ -7,7 +7,22 @@ import os
 from pathlib import Path
 from typing import Any, Iterable, Mapping
 
-from common import assert_active_route_path, append_run_header, read_csv, resolve_path, rows_to_markdown, setup_logger, write_csv, write_markdown
+from common import (
+    ROUTE_PROVENANCE_FIELDS,
+    assert_active_route_path,
+    append_run_header,
+    load_route_manifest,
+    read_csv,
+    resolve_path,
+    route_provenance_fields,
+    rows_to_markdown,
+    setup_logger,
+    validate_route_project_config,
+    validate_row_route_provenance,
+    write_csv,
+    write_markdown,
+    write_route_manifest,
+)
 
 
 JOB_FIELDS = [
@@ -45,7 +60,7 @@ JOB_FIELDS = [
     "log_file",
     "status",
     "notes",
-]
+] + ROUTE_PROVENANCE_FIELDS
 
 
 def _split_csv(value: str) -> list[str]:
@@ -367,6 +382,7 @@ Important:
 def main() -> int:
     parser = argparse.ArgumentParser(description="Prepare Stage 3 ProteinMPNN jobs for RFpeptides backbones.")
     parser.add_argument("--stage2-root", required=True)
+    parser.add_argument("--project-config", required=True)
     parser.add_argument("--output-root", default="", help="Defaults to --stage2-root.")
     parser.add_argument("--stage2-pass-csv", default="")
     parser.add_argument("--selected-backbones", required=True)
@@ -405,6 +421,12 @@ def main() -> int:
     assert_active_route_path(output_root, "Stage 22 output root", must_exist=False)
     assert_active_route_path(stage2_pass_csv, "Stage 22 Stage 2 pass CSV")
     assert_active_route_path(dl_binder_design_root, "Stage 22 dl_binder_design root")
+    route_manifest_path, route_manifest, route_manifest_sha256 = load_route_manifest(stage2_root)
+    validate_route_project_config(args.project_config, route_manifest)
+    source_route_provenance = route_provenance_fields(route_manifest_path, route_manifest, route_manifest_sha256)
+    if output_root.resolve() != stage2_root.resolve():
+        route_manifest_path, route_manifest, route_manifest_sha256 = write_route_manifest(output_root, route_manifest)
+    route_provenance = route_provenance_fields(route_manifest_path, route_manifest, route_manifest_sha256)
     dl_interface_design_script = dl_binder_design_root / "mpnn_fr" / "dl_interface_design.py"
     if not dl_interface_design_script.exists():
         raise RuntimeError(f"Missing dl_interface_design.py: {dl_interface_design_script}")
@@ -428,6 +450,7 @@ def main() -> int:
             raise RuntimeError(f"Selected backbone not found in Stage 2 pass CSV: {backbone_id}")
         if str(row.get("pass_backbone_qc", "")).strip().lower() != "true":
             raise RuntimeError(f"Selected backbone is not marked pass_backbone_qc=true: {backbone_id}")
+        validate_row_route_provenance(row, source_route_provenance, f"Stage 22 Stage 2 row {backbone_id}")
         source_pdb = _resolve_mixed_path(str(row.get("rf_pdb", "")))
         assert_active_route_path(source_pdb, f"Stage 22 source backbone PDB for {backbone_id}")
         if not source_pdb.exists():
@@ -451,6 +474,9 @@ def main() -> int:
         "selected_backbones": sorted(selected),
         "source_backbone_pdb_sha256": {key: source_pdb_hashes[key] for key in sorted(source_pdb_hashes)},
         "stage2_pass_csv_sha256": stage2_pass_csv_sha256,
+        "source_route_manifest_sha256": route_manifest_sha256,
+        "route_protocol_version": route_manifest["route_protocol_version"],
+        "hotspot_mapping_version": route_manifest["hotspot_mapping_version"],
         "stage3_mode": stage3_mode,
         "seqs_per_backbone": args.seqs_per_backbone,
         "relax_cycles": args.relax_cycles,
@@ -559,6 +585,7 @@ def main() -> int:
             "notes": f"Stage 3 {stage3_mode} command only; sequence design not run by this script. "
             + "Input copy notes: "
             + ";".join(copy_notes),
+            **route_provenance,
             }
         )
 
