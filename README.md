@@ -62,7 +62,7 @@ Stage 20-31 现在只接受完整的活跃配置：
 | `21c_cluster_stage2_backbone_families.py` | Stage 2.5B | 强制显式 Stage 0 target、核验聚合与源 provenance，在 target 对齐坐标系中按 cyclic-shift-minimized peptide CA RMSD 建立 family，并做批次/长度平衡筛选 |
 | `22_prepare_proteinmpnn_jobs.py` | Stage 3A | 读取 Stage 2.5 selected table，以 `global_backbone_id` 为唯一主键准备 ProteinMPNN-only 或 ProteinMPNN-FastRelax jobs |
 | `23_collect_proteinmpnn_sequences.py` | Stage 3C | 以 Stage 22 jobs 表和 `global_backbone_id` 为唯一契约，精确收集完整 ProteinMPNN 输出集，再检查序列、Site_2/hotspot、宏环和 clash |
-| `24_stage3d1_sidechain_repack.py` | Stage 3D-1 | PyRosetta side-chain repack-only，不移动 backbone |
+| `24_stage3d1_sidechain_repack.py` | Stage 3D-1 | 仅承接完整 ProteinMPNN-only run group，以 `global_backbone_id` 关联并做 PyRosetta side-chain repack-only；用写出前后 N/CA/C/O 坐标硬验证 backbone 未移动 |
 | `25_stage4_rosetta_interface_scoring.py` | Stage 4A-v2 | no-repack/no-minimization Rosetta score proxy、序列性质和 validation priority |
 | `26_prepare_afcycdesign_jobs.py` | Stage 5A 准备 | 合并 Stage 4 候选并准备 sequence-based independent-recovery jobs |
 | `27_collect_afcycdesign_validation.py` | Stage 5A 收集 | 解析 independent-recovery 模型并计算位点、姿态、拓扑和置信度 |
@@ -158,8 +158,9 @@ Stage 5A 和 Stage 5B 输出目录。它们保留原始绝对路径和旧参数�
 8. `21_collect_rfpeptides_backbones.py`：确认 runtime audit、target sequence identity、cyclic mask 和 direct contact 全部过门槛。
 9. `21b/21c`：确认跨批次只使用 `global_backbone_id`，重复审计与 family/平衡筛选没有改变 Stage 2 pass 状态。
 10. `23_collect_proteinmpnn_sequences.py`：确认 Stage 3 继续使用每个结构自己的 mapped residue number。
-11. `25_stage4_rosetta_interface_scoring.py`：确认不移动 backbone，分数不被描述为实验结合能。
-12. `26-31`：确认 Stage 5 identity/cache、template coverage、坐标对齐和 reference-site premise。
+11. `24_stage3d1_sidechain_repack.py`：确认只读取完整 run-group Stage 3C 表、只用 `global_backbone_id` 关联，并以坐标位移证明 repack 没有移动 peptide/target backbone。
+12. `25_stage4_rosetta_interface_scoring.py`：确认不移动 backbone，分数不被描述为实验结合能。
+13. `26-31`：确认 Stage 5 identity/cache、template coverage、坐标对齐和 reference-site premise。
 
 ## 当前 smoke 状态
 

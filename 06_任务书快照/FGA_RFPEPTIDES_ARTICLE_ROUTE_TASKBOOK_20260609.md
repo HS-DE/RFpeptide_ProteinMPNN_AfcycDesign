@@ -2638,3 +2638,74 @@ After a complete run, Stage 3C outputs are isolated under:
 ```text
 05_proteinmpnn_sequences/stage3c/stage3_312bp_7426f7fdb327/
 ```
+
+Stage 3D-1 fixed-backbone side-chain repack is run only after the complete
+Stage 3C table above exists. The active Stage 24 contract was updated on
+2026-07-30:
+
+- only `proteinmpnn_only` Stage 3C outputs are accepted;
+- the Stage 2.5 selection CSV, Stage 22 jobs CSV, and complete run-group Stage
+  3C CSV are all required explicit inputs;
+- `global_backbone_id` is the only backbone join key;
+- all 312 jobs and all 2,496 expected Stage 3B/3C rows are validated before an
+  optional subset is considered;
+- route manifests, source manifests, PDB paths, and recorded SHA-256 values
+  must agree;
+- Site_2 contact, hotspot contact, sequence validity, and head-to-tail geometry
+  must already pass before repacking. A severe-clash Stage 3C row remains
+  eligible because Stage 3D-1 is intended to test whether side-chain repacking
+  can remove that clash;
+- sequence duplicates are removed only within the same global backbone.
+  Identical sequences on different backbone families remain distinct;
+- PyRosetta performs side-chain repacking only. No FastRelax or backbone
+  minimization is used;
+- written input/output PDBs are compared atom by atom for peptide and target
+  N/CA/C/O coordinates. Movement above 0.002 A fails the fixed-backbone gate.
+
+Stage 3D-1 input-only preflight, after Stage 3C completes:
+
+```bash
+cd /mnt/c/SH/fga_cyclic_peptide_design
+source ~/fga_model_envs/miniforge3/etc/profile.d/conda.sh
+conda activate fga_stage1_fpocket
+
+python scripts/24_stage3d1_sidechain_repack.py \
+  --stage0-root results/rfpeptides_article_route_clean_20260615_fpocket \
+  --stage3-root results/rfpeptides_head_to_tail_v1_20260718_stage2_5_batches01_06 \
+  --project-config config/rfpeptides_head_to_tail.yaml \
+  --stage3-mode proteinmpnn_only \
+  --stage2-selection-csv results/rfpeptides_head_to_tail_v1_20260718_stage2_5_batches01_06/04_backbone_diversity/FGA_rfpeptides_stage2_5_selected_backbones.csv \
+  --stage3-jobs-csv results/rfpeptides_head_to_tail_v1_20260718_stage2_5_batches01_06/04_proteinmpnn_inputs/FGA_rfpeptides_stage3_312bp_7426f7fdb327_jobs.csv \
+  --stage3c-qc-csv results/rfpeptides_head_to_tail_v1_20260718_stage2_5_batches01_06/05_proteinmpnn_sequences/stage3c/stage3_312bp_7426f7fdb327/FGA_rfpeptides_stage3_312bp_7426f7fdb327_stage3C_sequences_qc.csv \
+  --validate-inputs-only
+```
+
+Full Stage 3D-1 execution uses the PyRosetta environment and the same locked
+inputs:
+
+```bash
+cd /mnt/c/SH/fga_cyclic_peptide_design
+source ~/fga_model_envs/miniforge3/etc/profile.d/conda.sh
+conda activate proteinmpnn_binder_design
+
+python scripts/24_stage3d1_sidechain_repack.py \
+  --stage0-root results/rfpeptides_article_route_clean_20260615_fpocket \
+  --stage3-root results/rfpeptides_head_to_tail_v1_20260718_stage2_5_batches01_06 \
+  --project-config config/rfpeptides_head_to_tail.yaml \
+  --stage3-mode proteinmpnn_only \
+  --stage2-selection-csv results/rfpeptides_head_to_tail_v1_20260718_stage2_5_batches01_06/04_backbone_diversity/FGA_rfpeptides_stage2_5_selected_backbones.csv \
+  --stage3-jobs-csv results/rfpeptides_head_to_tail_v1_20260718_stage2_5_batches01_06/04_proteinmpnn_inputs/FGA_rfpeptides_stage3_312bp_7426f7fdb327_jobs.csv \
+  --stage3c-qc-csv results/rfpeptides_head_to_tail_v1_20260718_stage2_5_batches01_06/05_proteinmpnn_sequences/stage3c/stage3_312bp_7426f7fdb327/FGA_rfpeptides_stage3_312bp_7426f7fdb327_stage3C_sequences_qc.csv
+```
+
+The run-group-scoped Stage 3D-1 outputs will be written under:
+
+```text
+05_proteinmpnn_sequences/stage3d1/stage3_312bp_7426f7fdb327/
+```
+
+Current status: Stage 24 code and input contract are ready, but Stage 3D-1 has
+not been run. The safety invocation stops before loading PyRosetta because
+Stage 3B and the complete Stage 3C table do not yet exist. Stage 4 must not be
+started until Stage 25 is adapted to this new run-group/global-ID Stage 3D-1
+output contract.
