@@ -2585,3 +2585,56 @@ Prepared but not executed:
 The preparation result is 312 one-to-one jobs and 312 normalized input PDBs.
 The runlist has 312 unique global-ID tags. Running the generated shell script
 is the separate Stage 3B model-execution step.
+
+Stage 3B ProteinMPNN-only execution command:
+
+```bash
+cd /mnt/c/SH/fga_cyclic_peptide_design
+source ~/fga_model_envs/miniforge3/etc/profile.d/conda.sh
+conda activate proteinmpnn_binder_design
+
+bash \
+  results/rfpeptides_head_to_tail_v1_20260718_stage2_5_batches01_06/04_proteinmpnn_inputs/run_stage3_312bp_7426f7fdb327.sh
+```
+
+This is the GPU sequence-generation step. With 312 global backbones and eight
+sequences per backbone, the locked jobs table expects exactly 2,496 Stage 3B
+PDB files. Stage 3B has not been run as part of the preparation or Stage 23
+hard-gate validation.
+
+Stage 3C collection/QC command, to be run only after Stage 3B completes:
+
+```bash
+cd /mnt/c/SH/fga_cyclic_peptide_design
+source ~/fga_model_envs/miniforge3/etc/profile.d/conda.sh
+conda activate fga_stage1_fpocket
+
+python scripts/23_collect_proteinmpnn_sequences.py \
+  --stage0-root results/rfpeptides_article_route_clean_20260615_fpocket \
+  --stage3-root results/rfpeptides_head_to_tail_v1_20260718_stage2_5_batches01_06 \
+  --project-config config/rfpeptides_head_to_tail.yaml \
+  --stage3-mode proteinmpnn_only \
+  --stage2-selection-csv results/rfpeptides_head_to_tail_v1_20260718_stage2_5_batches01_06/04_backbone_diversity/FGA_rfpeptides_stage2_5_selected_backbones.csv \
+  --stage3-jobs-csv results/rfpeptides_head_to_tail_v1_20260718_stage2_5_batches01_06/04_proteinmpnn_inputs/FGA_rfpeptides_stage3_312bp_7426f7fdb327_jobs.csv
+```
+
+Stage 23 treats the Stage 22 jobs CSV as authoritative and uses only
+`global_backbone_id` as the backbone key. Before parsing any PDB or writing any
+Stage 3C table, it validates the aggregate and six source route manifests,
+Stage 2.5 selection provenance, source/input PDB hashes, the exact runlist, and
+the exact expected output filenames. Missing, empty, or unexpected PDBs cause
+a hard failure; partial Stage 3C collection is not allowed.
+
+The current pre-execution safety check completed all upstream identity and
+provenance validation, then stopped as expected with:
+
+```text
+missing Stage 3B outputs: 2496
+Stage 3C outputs written: 0
+```
+
+After a complete run, Stage 3C outputs are isolated under:
+
+```text
+05_proteinmpnn_sequences/stage3c/stage3_312bp_7426f7fdb327/
+```

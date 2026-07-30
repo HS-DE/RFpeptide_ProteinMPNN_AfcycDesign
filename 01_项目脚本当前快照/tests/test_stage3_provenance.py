@@ -65,7 +65,11 @@ class Stage3ProvenanceTests(unittest.TestCase):
         target_pdb = root / "stage0_target.pdb"
         mapping_csv = root / "stage0_mapping.csv"
         target_pdb.write_text("ATOM\nEND\n", encoding="utf-8")
-        mapping_csv.write_text("rfpeptides_chain,rfpeptides_residue_number\nA,1\n", encoding="utf-8")
+        mapping_csv.write_text(
+            "rfpeptides_chain,rfpeptides_residue_number,is_target_site_residue,is_selected_hotspot\n"
+            "A,1,true,true\n",
+            encoding="utf-8",
+        )
         _, config_sha, effective_sha = common.load_active_route_config(ACTIVE_CONFIG)
         hotspots = ["A82", "A84", "A85", "A86"]
         source_manifest_payload = {
@@ -231,10 +235,60 @@ class Stage3ProvenanceTests(unittest.TestCase):
     def test_stage23_rejects_duplicate_and_aggregate_rows(self) -> None:
         with self.assertRaisesRegex(RuntimeError, "Duplicate Stage 3 job"):
             stage23._strict_lookup_rows(
-                [{"design_id": "A"}, {"design_id": "A"}], "design_id", "Stage 3 job"
+                [{"global_backbone_id": "A"}, {"global_backbone_id": "A"}],
+                "global_backbone_id",
+                "Stage 3 job",
             )
         with self.assertRaisesRegex(RuntimeError, "aggregate"):
-            stage23._strict_lookup_rows([{"design_id": "A,B"}], "design_id", "Stage 3 job")
+            stage23._strict_lookup_rows(
+                [{"global_backbone_id": "A,B"}],
+                "global_backbone_id",
+                "Stage 3 job",
+            )
+
+    def test_stage23_derives_exact_proteinmpnn_only_output_names(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            rows = self._run_stage22(root, "output_a", temperature=0.1)
+            job = rows[0]
+            expected = stage23._expected_stage3_outputs(
+                job_row=job,
+                stage3_root=root / "output_a",
+                expected_stage3_mode="proteinmpnn_only",
+                backbone_id=job["global_backbone_id"],
+            )
+
+        self.assertEqual(len(expected), 8)
+        self.assertEqual(
+            {path.name for path in expected},
+            {
+                f"{job['input_tag']}_dldesign_{index}.pdb"
+                for index in range(8)
+            },
+        )
+
+    def test_stage23_requires_complete_exact_output_set(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            output_dir = root / "outputs"
+            expected = {
+                (output_dir / "global_a_dldesign_0.pdb").resolve(): (root / "input.pdb", "global_a"),
+                (output_dir / "global_a_dldesign_1.pdb").resolve(): (root / "input.pdb", "global_a"),
+            }
+            with self.assertRaisesRegex(RuntimeError, "missing=2"):
+                stage23._validate_complete_stage3_outputs({"global_a": expected})
+
+            output_dir.mkdir()
+            for path in expected:
+                path.write_text("MODEL\n", encoding="utf-8")
+            self.assertEqual(
+                stage23._validate_complete_stage3_outputs({"global_a": expected}),
+                2,
+            )
+
+            (output_dir / "stale_output.pdb").write_text("MODEL\n", encoding="utf-8")
+            with self.assertRaisesRegex(RuntimeError, "unexpected=1"):
+                stage23._validate_complete_stage3_outputs({"global_a": expected})
 
     def test_stage22_rejects_source_manifest_outside_aggregate_route(self) -> None:
         with self.assertRaisesRegex(RuntimeError, "not listed"):

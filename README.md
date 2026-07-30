@@ -61,7 +61,7 @@ Stage 20-31 现在只接受完整的活跃配置：
 | `21b_build_stage2_global_backbone_manifest.py` | Stage 2.5A | 严格核验并合并多批 Stage 2 route manifest/逐行 provenance，以 source route run + local ID 建立全局 backbone 主键，并审计 PDB/坐标重复 |
 | `21c_cluster_stage2_backbone_families.py` | Stage 2.5B | 强制显式 Stage 0 target、核验聚合与源 provenance，在 target 对齐坐标系中按 cyclic-shift-minimized peptide CA RMSD 建立 family，并做批次/长度平衡筛选 |
 | `22_prepare_proteinmpnn_jobs.py` | Stage 3A | 读取 Stage 2.5 selected table，以 `global_backbone_id` 为唯一主键准备 ProteinMPNN-only 或 ProteinMPNN-FastRelax jobs |
-| `23_collect_proteinmpnn_sequences.py` | Stage 3C | 收集 ProteinMPNN 输出并重新检查序列、Site_2/hotspot、宏环和 clash |
+| `23_collect_proteinmpnn_sequences.py` | Stage 3C | 以 Stage 22 jobs 表和 `global_backbone_id` 为唯一契约，精确收集完整 ProteinMPNN 输出集，再检查序列、Site_2/hotspot、宏环和 clash |
 | `24_stage3d1_sidechain_repack.py` | Stage 3D-1 | PyRosetta side-chain repack-only，不移动 backbone |
 | `25_stage4_rosetta_interface_scoring.py` | Stage 4A-v2 | no-repack/no-minimization Rosetta score proxy、序列性质和 validation priority |
 | `26_prepare_afcycdesign_jobs.py` | Stage 5A 准备 | 合并 Stage 4 候选并准备 sequence-based independent-recovery jobs |
@@ -209,3 +209,12 @@ runtime-fix 参考，不应替代 N1-v3 的完整端到端证据。
 Stage 3A 只准备输入与运行脚本，没有执行 ProteinMPNN。生成的
 `design_id`、`backbone_id`、输入标签和 job identity 均使用
 `global_backbone_id`；原批次内 ID 只保留为 `source_local_design_id`。
+
+Stage 23 已改为严格承接该全局身份表。它不再按 local ID 或宽泛 glob
+猜测输出，而是由 312 行 jobs 表精确推导 2,496 个预期 PDB 文件名；在任何
+Stage 3C QC 和结果写出前，必须同时通过 aggregate/source manifest、逐行
+provenance、Stage 2.5 selection、源/输入 PDB 哈希、runlist 以及完整输出集
+校验。缺少、空文件或额外 PDB 都会硬失败，不允许部分收集。
+
+当前只完成了安全门槛验证，没有执行 ProteinMPNN：上游 312-job 契约通过，
+随后因 2,496 个 Stage 3B 输出尚不存在而按预期停止，Stage 3C 输出为 0。

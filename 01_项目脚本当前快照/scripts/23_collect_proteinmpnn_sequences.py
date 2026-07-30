@@ -10,6 +10,7 @@ from typing import Any, Iterable, Mapping, Sequence
 
 from common import (
     ROUTE_PROVENANCE_FIELDS,
+    SOURCE_ROUTE_PROVENANCE_FIELDS,
     assert_active_route_path,
     append_run_header,
     load_route_manifest,
@@ -19,7 +20,6 @@ from common import (
     rows_to_markdown,
     setup_logger,
     validate_route_project_config,
-    validate_row_route_provenance,
     write_csv,
     write_fasta,
     write_markdown,
@@ -33,12 +33,26 @@ STAGE3C_FIELDS = [
     "stage3_job_id",
     "run_group_id",
     "protocol_identity_sha256",
+    "stage3_mode",
+    "global_backbone_id",
+    "source_local_design_id",
+    "source_batch_label",
+    "backbone_family_id",
     "backbone_id",
     "site_label",
     "site_id",
+    "stage3_jobs_csv",
+    "stage3_jobs_csv_sha256",
+    "stage2_selection_csv",
+    "stage2_selection_csv_sha256",
+    "stage3_input_pdb",
+    "stage3_input_pdb_sha256",
     "relaxed_pdb",
+    "relaxed_pdb_sha256",
     "source_backbone_pdb",
     "source_backbone_pdb_sha256",
+    "expected_stage3b_outputs_for_backbone",
+    "observed_stage3b_outputs_for_backbone",
     "file_status",
     "parse_status",
     "target_chain",
@@ -82,7 +96,7 @@ STAGE3C_FIELDS = [
     "pass_stage3c_qc",
     "qc_failure_reasons",
     "qc_notes",
-] + ROUTE_PROVENANCE_FIELDS
+] + ROUTE_PROVENANCE_FIELDS + SOURCE_ROUTE_PROVENANCE_FIELDS
 
 
 def _split_csv(value: str) -> list[str]:
@@ -182,57 +196,277 @@ def _strict_lookup_rows(
     return lookup
 
 
+def _single_value(rows: Sequence[Mapping[str, str]], field: str, label: str) -> str:
+    values = {str(row.get(field, "")).strip() for row in rows if str(row.get(field, "")).strip()}
+    if len(values) != 1:
+        raise RuntimeError(f"Expected exactly one non-empty {field} in {label}; found {sorted(values)}")
+    return next(iter(values))
+
+
+def _require_within(path: Path, root: Path, label: str) -> None:
+    try:
+        path.resolve().relative_to(root.resolve())
+    except ValueError as exc:
+        raise RuntimeError(f"{label} is outside its required root: path={path}, root={root}") from exc
+
+
+def _validate_cached_route_provenance(
+    row: Mapping[str, Any],
+    expected: Mapping[str, str],
+    label: str,
+) -> None:
+    observed_manifest = _resolve_mixed_path(str(row.get("route_manifest_path", ""))).resolve()
+    expected_manifest = _resolve_mixed_path(str(expected["route_manifest_path"])).resolve()
+    if observed_manifest != expected_manifest:
+        raise RuntimeError(
+            f"{label} route provenance mismatch for route_manifest_path: "
+            f"observed={observed_manifest}, expected={expected_manifest}"
+        )
+    for field in ROUTE_PROVENANCE_FIELDS:
+        if field == "route_manifest_path":
+            continue
+        observed = str(row.get(field, "")).strip()
+        if observed != str(expected[field]):
+            raise RuntimeError(
+                f"{label} route provenance mismatch for {field}: "
+                f"observed={observed!r}, expected={expected[field]!r}"
+            )
+
+
+def _aggregate_source_manifest_lookup(
+    route_manifest: Mapping[str, Any],
+) -> dict[Path, dict[str, str]]:
+    records = route_manifest.get("source_route_manifests")
+    if not isinstance(records, list) or not records:
+        raise RuntimeError("Stage 23 requires a Stage 2.5 aggregate route manifest with source_route_manifests")
+    expected_count = int(route_manifest.get("stage2_5_source_count", len(records)))
+    if len(records) != expected_count:
+        raise RuntimeError(
+            f"Stage 23 aggregate source manifest count mismatch: records={len(records)}, expected={expected_count}"
+        )
+
+    lookup: dict[Path, dict[str, str]] = {}
+    for index, record in enumerate(records, start=1):
+        if not isinstance(record, Mapping):
+            raise RuntimeError(f"Stage 23 aggregate source manifest record {index} is invalid")
+        required = ["run_id", "batch_id", "manifest_path", "manifest_sha256"]
+        missing = [field for field in required if not str(record.get(field, "")).strip()]
+        if missing:
+            raise RuntimeError(f"Stage 23 aggregate source manifest record {index} is missing {missing}")
+        manifest_path = assert_active_route_path(
+            _resolve_mixed_path(str(record["manifest_path"])),
+            f"Stage 23 aggregate source route manifest {index}",
+        ).resolve()
+        if manifest_path in lookup:
+            raise RuntimeError(f"Stage 23 aggregate route lists a source manifest more than once: {manifest_path}")
+        actual_sha256 = _sha256_file(manifest_path)
+        expected_sha256 = str(record["manifest_sha256"]).strip()
+        if actual_sha256 != expected_sha256:
+            raise RuntimeError(
+                f"Stage 23 aggregate source route manifest SHA-256 mismatch: {manifest_path}"
+            )
+        _, source_manifest, loaded_sha256 = load_route_manifest(manifest_path.parent)
+        if loaded_sha256 != expected_sha256:
+            raise RuntimeError(f"Stage 23 source route manifest changed during validation: {manifest_path}")
+        if str(source_manifest["run_id"]) != str(record["run_id"]).strip():
+            raise RuntimeError(f"Stage 23 aggregate source run_id mismatch: {manifest_path}")
+        if str(source_manifest["batch_id"]) != str(record["batch_id"]).strip():
+            raise RuntimeError(f"Stage 23 aggregate source batch_id mismatch: {manifest_path}")
+        lookup[manifest_path] = {
+            "source_run_id": str(record["run_id"]).strip(),
+            "source_batch_id": str(record["batch_id"]).strip(),
+            "source_route_manifest_sha256": expected_sha256,
+        }
+    return lookup
+
+
+def _validate_aggregate_source_membership(
+    row: Mapping[str, Any],
+    aggregate_sources: Mapping[Path, Mapping[str, str]],
+    label: str,
+) -> None:
+    source_manifest = _resolve_mixed_path(str(row.get("source_route_manifest", ""))).resolve()
+    expected = aggregate_sources.get(source_manifest)
+    if expected is None:
+        raise RuntimeError(f"{label} source route manifest is not listed by the Stage 2.5 aggregate route")
+    for field in ["source_run_id", "source_batch_id", "source_route_manifest_sha256"]:
+        observed = str(row.get(field, "")).strip()
+        if observed != str(expected[field]):
+            raise RuntimeError(
+                f"{label} aggregate source provenance mismatch for {field}: "
+                f"observed={observed!r}, expected={expected[field]!r}"
+            )
+
+
+def _expected_stage3_outputs(
+    *,
+    job_row: Mapping[str, str],
+    stage3_root: Path,
+    expected_stage3_mode: str,
+    backbone_id: str,
+) -> dict[Path, tuple[Path, str]]:
+    tags = _split_csv(str(job_row.get("input_tags", "")))
+    input_pdbs = [_resolve_mixed_path(value) for value in _split_csv(str(job_row.get("input_pdbs", "")))]
+    input_hashes = _split_csv(str(job_row.get("input_pdb_sha256s", "")))
+    if not tags or len(tags) != len(set(tags)):
+        raise RuntimeError(f"Stage 3 job has blank or duplicate input tags for {backbone_id}")
+    if len(input_pdbs) != len(tags) or len(input_hashes) != len(tags):
+        raise RuntimeError(f"Stage 3 job input tag/PDB/hash counts disagree for {backbone_id}")
+
+    input_dir = assert_active_route_path(
+        _resolve_mixed_path(str(job_row.get("input_pdb_dir", ""))),
+        f"Stage 23 input PDB directory for {backbone_id}",
+    )
+    _require_within(input_dir, stage3_root, f"Stage 23 input PDB directory for {backbone_id}")
+    for tag, input_pdb, expected_sha256 in zip(tags, input_pdbs, input_hashes):
+        input_pdb = assert_active_route_path(input_pdb, f"Stage 23 input PDB {tag}")
+        _require_within(input_pdb, input_dir, f"Stage 23 input PDB {tag}")
+        if input_pdb.stem != tag:
+            raise RuntimeError(f"Stage 3 input tag/PDB stem mismatch for {backbone_id}: {tag} != {input_pdb.stem}")
+        if _sha256_file(input_pdb) != expected_sha256:
+            raise RuntimeError(f"Stage 3 input PDB SHA-256 mismatch for {backbone_id}: {input_pdb}")
+
+    if str(job_row.get("input_tag", "")).strip() != tags[0]:
+        raise RuntimeError(f"Stage 3 job input_tag does not match first input_tags entry for {backbone_id}")
+    if _resolve_mixed_path(str(job_row.get("input_pdb", ""))).resolve() != input_pdbs[0].resolve():
+        raise RuntimeError(f"Stage 3 job input_pdb does not match first input_pdbs entry for {backbone_id}")
+    if str(job_row.get("input_pdb_sha256", "")).strip() != input_hashes[0]:
+        raise RuntimeError(f"Stage 3 job input_pdb_sha256 does not match first hash for {backbone_id}")
+
+    output_dir = _resolve_mixed_path(str(job_row.get("output_pdb_dir", "")))
+    if not str(job_row.get("output_pdb_dir", "")).strip():
+        raise RuntimeError(f"Stage 3 job is missing output_pdb_dir for {backbone_id}")
+    assert_active_route_path(output_dir, f"Stage 23 output PDB directory for {backbone_id}", must_exist=False)
+    _require_within(output_dir, stage3_root, f"Stage 23 output PDB directory for {backbone_id}")
+
+    seqs_per_backbone = _parse_int(job_row.get("seqs_per_backbone", "0"))
+    relax_cycles = _parse_int(job_row.get("relax_cycles", "-1"), -1)
+    if seqs_per_backbone <= 0 or relax_cycles < 0:
+        raise RuntimeError(f"Stage 3 job has invalid sequence/relax counts for {backbone_id}")
+
+    expected: dict[Path, tuple[Path, str]] = {}
+    if expected_stage3_mode == "proteinmpnn_only":
+        if relax_cycles != 0 or len(tags) != 1:
+            raise RuntimeError(f"ProteinMPNN-only job shape is invalid for {backbone_id}")
+        for design_index in range(seqs_per_backbone):
+            path = output_dir / f"{tags[0]}_dldesign_{design_index}.pdb"
+            expected[path.resolve()] = (input_pdbs[0], tags[0])
+    else:
+        if relax_cycles <= 0 or len(tags) != seqs_per_backbone:
+            raise RuntimeError(f"ProteinMPNN-FastRelax job shape is invalid for {backbone_id}")
+        for tag, input_pdb in zip(tags, input_pdbs):
+            path = output_dir / f"{tag}_dldesign_0_cycle{relax_cycles}.pdb"
+            expected[path.resolve()] = (input_pdb, tag)
+    return expected
+
+
 def _validate_stage3_job_row(
     *,
     backbone_id: str,
     backbone_row: Mapping[str, str],
     job_row: Mapping[str, str],
     expected_stage3_mode: str,
-) -> None:
-    if str(job_row.get("design_id", "")).strip() != backbone_id:
-        raise RuntimeError(f"Stage 3 job design_id does not match selected backbone: {backbone_id}")
-    if str(job_row.get("backbone_id", "")).strip() not in {"", backbone_id}:
-        raise RuntimeError(f"Stage 3 job backbone_id does not match selected backbone: {backbone_id}")
+    stage3_root: Path,
+    stage2_selection_csv: Path,
+    stage2_selection_csv_sha256: str,
+    aggregate_sources: Mapping[Path, Mapping[str, str]],
+) -> dict[Path, tuple[Path, str]]:
+    for field in ["global_backbone_id", "design_id", "backbone_id"]:
+        if str(job_row.get(field, "")).strip() != backbone_id:
+            raise RuntimeError(f"Stage 3 job {field} does not match global backbone ID: {backbone_id}")
+    if str(backbone_row.get("global_backbone_id", "")).strip() != backbone_id:
+        raise RuntimeError(f"Stage 2.5 row global_backbone_id mismatch: {backbone_id}")
+    expected_global_id = (
+        f"{str(backbone_row.get('source_run_id', '')).strip()}__"
+        f"{str(backbone_row.get('source_local_design_id', '')).strip()}"
+    )
+    if backbone_id != expected_global_id:
+        raise RuntimeError(f"Stage 2.5 global backbone identity formula mismatch: {backbone_id}")
     if str(job_row.get("stage3_mode", "")).strip() != expected_stage3_mode:
         raise RuntimeError(
             f"Stage 3 job mode mismatch for {backbone_id}: expected={expected_stage3_mode}, "
             f"actual={job_row.get('stage3_mode', '')}"
         )
+    for field in ["source_local_design_id", "source_batch_label", "backbone_family_id"]:
+        if str(job_row.get(field, "")).strip() != str(backbone_row.get(field, "")).strip():
+            raise RuntimeError(f"Stage 3 job and Stage 2.5 row disagree for {field}: {backbone_id}")
+
+    _validate_aggregate_source_membership(job_row, aggregate_sources, f"Stage 23 Stage 3 job {backbone_id}")
+    _validate_aggregate_source_membership(backbone_row, aggregate_sources, f"Stage 23 Stage 2.5 row {backbone_id}")
+    for field in SOURCE_ROUTE_PROVENANCE_FIELDS:
+        if str(job_row.get(field, "")).strip() != str(backbone_row.get(field, "")).strip():
+            raise RuntimeError(f"Stage 3 job and Stage 2.5 row source provenance disagree for {field}: {backbone_id}")
+
+    recorded_selection = assert_active_route_path(
+        _resolve_mixed_path(str(job_row.get("stage2_selection_csv", ""))),
+        f"Stage 23 recorded Stage 2.5 selection CSV for {backbone_id}",
+    )
+    if recorded_selection.resolve() != stage2_selection_csv.resolve():
+        raise RuntimeError(f"Stage 3 job references a different Stage 2.5 selection CSV: {backbone_id}")
+    if str(job_row.get("stage2_selection_csv_sha256", "")).strip() != stage2_selection_csv_sha256:
+        raise RuntimeError(f"Stage 3 job Stage 2.5 selection CSV SHA-256 mismatch: {backbone_id}")
+
     source_text = str(job_row.get("source_backbone_pdb", "")).strip()
     source_sha256 = str(job_row.get("source_backbone_pdb_sha256", "")).strip().lower()
-    if not source_text or not source_sha256:
-        raise RuntimeError(f"Stage 3 job is missing source backbone path/hash for {backbone_id}")
-    job_source = _resolve_mixed_path(source_text)
-    stage2_source = _resolve_mixed_path(str(backbone_row.get("rf_pdb", "")))
-    assert_active_route_path(job_source, f"Stage 23 job source PDB for {backbone_id}")
-    assert_active_route_path(stage2_source, f"Stage 23 Stage 2 source PDB for {backbone_id}")
-    if not job_source.exists() or not stage2_source.exists():
-        raise RuntimeError(f"Stage 3 source backbone PDB is missing for {backbone_id}")
+    job_source = assert_active_route_path(
+        _resolve_mixed_path(source_text),
+        f"Stage 23 job source PDB for {backbone_id}",
+    )
+    stage2_source = assert_active_route_path(
+        _resolve_mixed_path(str(backbone_row.get("rf_pdb", ""))),
+        f"Stage 23 Stage 2.5 source PDB for {backbone_id}",
+    )
     if job_source.resolve() != stage2_source.resolve():
         raise RuntimeError(
             f"Stage 3 source backbone path mismatch for {backbone_id}: job={job_source}, stage2={stage2_source}"
         )
     actual_sha256 = _sha256_file(job_source)
-    if actual_sha256 != source_sha256:
-        raise RuntimeError(
-            f"Stage 3 source backbone SHA-256 mismatch for {backbone_id}: "
-            f"expected={source_sha256}, actual={actual_sha256}"
-        )
-    if not str(job_row.get("stage3_job_id", "")).strip():
-        raise RuntimeError(f"Stage 3 job is missing stage3_job_id for {backbone_id}")
-    if not str(job_row.get("run_group_id", "")).strip():
-        raise RuntimeError(f"Stage 3 job is missing run_group_id for {backbone_id}")
-    if not str(job_row.get("protocol_identity_sha256", "")).strip():
-        raise RuntimeError(f"Stage 3 job is missing protocol identity for {backbone_id}")
+    if actual_sha256 != source_sha256 or actual_sha256 != str(backbone_row.get("pdb_sha256", "")).strip():
+        raise RuntimeError(f"Stage 3 source backbone SHA-256 mismatch for {backbone_id}")
+
+    for field in ["stage3_job_id", "run_group_id", "protocol_identity_sha256"]:
+        if not str(job_row.get(field, "")).strip():
+            raise RuntimeError(f"Stage 3 job is missing {field} for {backbone_id}")
+    expected_job_id = _safe_token(
+        f"{backbone_id}_{expected_stage3_mode}_"
+        f"{str(job_row.get('protocol_identity_sha256', '')).strip()[:12]}"
+    )
+    if str(job_row.get("stage3_job_id", "")).strip() != expected_job_id:
+        raise RuntimeError(f"Stage 3 job identity formula mismatch for {backbone_id}")
+    return _expected_stage3_outputs(
+        job_row=job_row,
+        stage3_root=stage3_root,
+        expected_stage3_mode=expected_stage3_mode,
+        backbone_id=backbone_id,
+    )
 
 
-def _stage3_job_provenance(job_row: Mapping[str, str]) -> dict[str, str]:
+def _stage3_job_provenance(
+    job_row: Mapping[str, str],
+    *,
+    stage3_jobs_csv: Path,
+    stage3_jobs_csv_sha256: str,
+    expected_count: int,
+    observed_count: int,
+) -> dict[str, str | int]:
     return {
         "stage3_job_id": str(job_row.get("stage3_job_id", "")),
         "run_group_id": str(job_row.get("run_group_id", "")),
         "protocol_identity_sha256": str(job_row.get("protocol_identity_sha256", "")),
+        "stage3_mode": str(job_row.get("stage3_mode", "")),
+        "global_backbone_id": str(job_row.get("global_backbone_id", "")),
+        "source_local_design_id": str(job_row.get("source_local_design_id", "")),
+        "source_batch_label": str(job_row.get("source_batch_label", "")),
+        "backbone_family_id": str(job_row.get("backbone_family_id", "")),
         "source_backbone_pdb": str(job_row.get("source_backbone_pdb", "")),
         "source_backbone_pdb_sha256": str(job_row.get("source_backbone_pdb_sha256", "")),
+        "stage3_jobs_csv": str(stage3_jobs_csv),
+        "stage3_jobs_csv_sha256": stage3_jobs_csv_sha256,
+        "stage2_selection_csv": str(job_row.get("stage2_selection_csv", "")),
+        "stage2_selection_csv_sha256": str(job_row.get("stage2_selection_csv_sha256", "")),
+        "expected_stage3b_outputs_for_backbone": expected_count,
+        "observed_stage3b_outputs_for_backbone": observed_count,
+        **{field: str(job_row.get(field, "")) for field in SOURCE_ROUTE_PROVENANCE_FIELDS},
     }
 
 
@@ -489,22 +723,51 @@ def _parse_rosetta_energy_table(path: Path, peptide_length: int) -> tuple[str, f
     )
 
 
-def _relaxed_pdbs_for_backbone(output_pdb_dir: Path, backbone_id: str) -> list[Path]:
-    patterns = [
-        f"{backbone_id}_mpnnonly_*_dldesign_*.pdb",
-        f"{backbone_id}_mpnnfr_*_dldesign_*_cycle*.pdb",
-        f"{backbone_id}*_dldesign_*.pdb",
-        f"{backbone_id}*_dldesign_*_cycle*.pdb",
-        f"{backbone_id}*.pdb",
-    ]
-    seen: set[Path] = set()
-    files: list[Path] = []
-    for pattern in patterns:
-        for path in sorted(output_pdb_dir.glob(pattern)):
-            if path not in seen:
-                seen.add(path)
-                files.append(path)
-    return files
+def _validate_complete_stage3_outputs(
+    expected_by_backbone: Mapping[str, Mapping[Path, tuple[Path, str]]],
+) -> int:
+    expected_paths: set[Path] = set()
+    output_dirs: set[Path] = set()
+    for backbone_id, expected in expected_by_backbone.items():
+        if not expected:
+            raise RuntimeError(f"Stage 3 job has no expected output paths: {backbone_id}")
+        for path in expected:
+            resolved = path.resolve()
+            if resolved in expected_paths:
+                raise RuntimeError(f"Two Stage 3 jobs expect the same output PDB: {resolved}")
+            expected_paths.add(resolved)
+            output_dirs.add(resolved.parent)
+
+    actual_paths: set[Path] = set()
+    for output_dir in output_dirs:
+        output_dir = assert_active_route_path(
+            output_dir,
+            "Stage 23 Stage 3B output directory",
+            must_exist=False,
+        )
+        if output_dir.exists():
+            for path in output_dir.glob("*.pdb"):
+                actual_paths.add(path.resolve())
+
+    missing = sorted(expected_paths - actual_paths, key=str)
+    unexpected = sorted(actual_paths - expected_paths, key=str)
+    empty = sorted(
+        [path for path in expected_paths & actual_paths if path.stat().st_size == 0],
+        key=str,
+    )
+    if missing or unexpected or empty:
+        details = []
+        if missing:
+            details.append(f"missing={len(missing)} first={missing[:5]}")
+        if unexpected:
+            details.append(f"unexpected={len(unexpected)} first={unexpected[:5]}")
+        if empty:
+            details.append(f"empty={len(empty)} first={empty[:5]}")
+        raise RuntimeError(
+            "Stage 3B output set is incomplete or contaminated; Stage 3C was not started. "
+            + "; ".join(details)
+        )
+    return len(actual_paths)
 
 
 def _qc_row_for_relaxed_pdb(
@@ -524,7 +787,10 @@ def _qc_row_for_relaxed_pdb(
     macrocycle_warn_distance: float,
     forbidden_aas: str,
 ) -> dict[str, Any]:
-    backbone_id = str(backbone_row.get("design_id", "")).strip()
+    backbone_id = str(
+        backbone_row.get("global_backbone_id", "")
+        or backbone_row.get("design_id", "")
+    ).strip()
     sequence_design_id = relaxed_pdb.stem
     target_chain = str(backbone_row.get("target_chain", "")).strip() or "A"
     peptide_chain = str(backbone_row.get("peptide_chain", "")).strip() or "B"
@@ -557,6 +823,7 @@ def _qc_row_for_relaxed_pdb(
         return base_row
 
     base_row["file_status"] = "pass"
+    base_row["relaxed_pdb_sha256"] = _sha256_file(relaxed_pdb)
     try:
         chains = parse_residues(relaxed_pdb)
     except Exception as exc:  # pragma: no cover - malformed external PDBs
@@ -758,6 +1025,57 @@ def _status_lines(rows: list[Mapping[str, Any]], field: str) -> str:
     return "\n".join(f"- {key or 'blank'}: {counts[key]}" for key in sorted(counts))
 
 
+def _stage0_site_inputs(
+    *,
+    route_manifest: Mapping[str, Any],
+    stage0_root: Path,
+) -> tuple[str, Path, Path]:
+    records = route_manifest.get("stage0_sites")
+    if not isinstance(records, list) or len(records) != 1 or not isinstance(records[0], Mapping):
+        raise RuntimeError("Stage 23 requires exactly one Stage 0 site record in the aggregate route manifest")
+    record = records[0]
+    site_label = str(record.get("site_label", "")).strip()
+    target_pdb = assert_active_route_path(
+        _resolve_mixed_path(str(record.get("target_pdb", ""))),
+        "Stage 23 manifest-locked Stage 0 target PDB",
+    )
+    mapping_csv = assert_active_route_path(
+        _resolve_mixed_path(str(record.get("mapping_csv", ""))),
+        "Stage 23 manifest-locked Stage 0 mapping CSV",
+    )
+    _require_within(target_pdb, stage0_root, "Stage 23 Stage 0 target PDB")
+    _require_within(mapping_csv, stage0_root, "Stage 23 Stage 0 mapping CSV")
+    if _sha256_file(target_pdb) != str(record.get("target_pdb_sha256", "")).strip():
+        raise RuntimeError("Stage 23 Stage 0 target PDB SHA-256 does not match the aggregate route manifest")
+    if _sha256_file(mapping_csv) != str(record.get("mapping_csv_sha256", "")).strip():
+        raise RuntimeError("Stage 23 Stage 0 mapping CSV SHA-256 does not match the aggregate route manifest")
+    return site_label, target_pdb, mapping_csv
+
+
+def _validate_runlist_contract(
+    *,
+    job_rows: Sequence[Mapping[str, str]],
+    stage3_root: Path,
+) -> tuple[Path, int]:
+    runlist = assert_active_route_path(
+        _resolve_mixed_path(_single_value(job_rows, "runlist", "Stage 3 jobs")),
+        "Stage 23 Stage 3 runlist",
+    )
+    _require_within(runlist, stage3_root, "Stage 23 Stage 3 runlist")
+    expected_tags: list[str] = []
+    for row in job_rows:
+        expected_tags.extend(_split_csv(str(row.get("input_tags", ""))))
+    if not expected_tags or len(expected_tags) != len(set(expected_tags)):
+        raise RuntimeError("Stage 3 jobs contain blank or duplicate input tags")
+    actual_tags = [line.strip() for line in runlist.read_text(encoding="utf-8").splitlines() if line.strip()]
+    if actual_tags != expected_tags:
+        raise RuntimeError(
+            "Stage 3 runlist does not exactly match the ordered input_tags in the jobs CSV: "
+            f"expected={len(expected_tags)}, actual={len(actual_tags)}"
+        )
+    return runlist, len(actual_tags)
+
+
 def _summary_markdown(
     *,
     rows: list[Mapping[str, Any]],
@@ -765,6 +1083,12 @@ def _summary_markdown(
     output_dir: Path,
     site_numbers: set[str],
     hotspot_numbers: set[str],
+    run_group_id: str,
+    stage2_selection_csv: Path,
+    stage3_jobs_csv: Path,
+    job_count: int,
+    selected_backbone_count: int,
+    expected_output_count: int,
 ) -> str:
     pass_rows = [row for row in rows if row.get("pass_stage3c_qc") == "true"]
     top_rows = sorted(
@@ -808,7 +1132,12 @@ Parameters:
 ```text
 stage3_mode: {args.stage3_mode}
 stage3_root: {args.stage3_root}
-selected_backbones: {args.selected_backbones}
+run_group_id: {run_group_id}
+stage2_selection_csv: {stage2_selection_csv}
+stage3_jobs_csv: {stage3_jobs_csv}
+jobs_in_authoritative_table: {job_count}
+selected_global_backbones_collected: {selected_backbone_count}
+expected_complete_stage3b_outputs: {expected_output_count}
 contact_cutoff_A: {args.contact_cutoff}
 site_near_distance_A: {args.site_near_distance}
 hotspot_near_distance_A: {args.hotspot_near_distance}
@@ -841,6 +1170,10 @@ total_stage3b_outputs: {len(rows)}
 pass_stage3c_qc: {len(pass_rows)}
 ```
 
+Before QC began, Stage 23 required the complete, exact output set derived from
+the authoritative Stage 22 jobs table. Missing, empty, or unexpected PDB files
+cause a hard failure and no partial Stage 3C table is written.
+
 ## Sequence Status
 
 {_status_lines(rows, "sequence_status")}
@@ -860,6 +1193,9 @@ pass_stage3c_qc: {len(pass_rows)}
 ## Ranked Stage 3C Rows
 
 {rows_to_markdown(top_rows, columns, "No Stage 3B outputs were parsed.")}
+
+These Stage 3C rows are sequence-designed intermediate structures, not final
+peptide candidates.
 """
 
 
@@ -929,12 +1265,19 @@ def main() -> int:
     parser.add_argument(
         "--stage3-mode",
         choices=["proteinmpnn_fastrelax", "proteinmpnn_only"],
-        default="proteinmpnn_only",
-        help="Select mode-specific Stage 3B job/output defaults.",
+        required=True,
+        help="Must exactly match the mode locked in the Stage 22 jobs table.",
     )
-    parser.add_argument("--selected-backbones", required=True)
-    parser.add_argument("--stage2-pass-csv", default="")
+    parser.add_argument("--stage2-selection-csv", required=True)
     parser.add_argument("--stage3-jobs-csv", required=True)
+    parser.add_argument(
+        "--selected-global-backbones",
+        default="",
+        help=(
+            "Optional comma-separated global_backbone_id subset to report. "
+            "The complete jobs-table output set is still required before any Stage 3C QC starts."
+        ),
+    )
     parser.add_argument("--contact-cutoff", type=float, default=5.0)
     parser.add_argument("--site-near-distance", type=float, default=6.0)
     parser.add_argument("--hotspot-near-distance", type=float, default=8.0)
@@ -967,103 +1310,198 @@ def main() -> int:
     if args.macrocycle_warn_distance < args.macrocycle_pass_distance:
         raise RuntimeError("--macrocycle-warn-distance must be >= --macrocycle-pass-distance")
 
-    stage0_root = _resolve_mixed_path(args.stage0_root)
-    stage3_root = _resolve_mixed_path(args.stage3_root)
-    output_root = _resolve_mixed_path(args.output_root) if args.output_root else stage3_root
-    output_dir = output_root / "05_proteinmpnn_sequences"
-    output_name_suffix = "" if args.stage3_mode == "proteinmpnn_fastrelax" else f"_{args.stage3_mode}"
-    fasta_dir = output_dir / ("fasta" if args.stage3_mode == "proteinmpnn_fastrelax" else f"fasta_{args.stage3_mode}")
-    stage2_pass_csv = (
-        _resolve_mixed_path(args.stage2_pass_csv)
-        if args.stage2_pass_csv
-        else stage3_root / "03_backbone_qc" / "FGA_rfpeptides_backbones_qc_pass.csv"
+    stage0_root = assert_active_route_path(
+        _resolve_mixed_path(args.stage0_root),
+        "Stage 23 Stage 0 root",
     )
-    stage3_jobs_csv = _resolve_mixed_path(args.stage3_jobs_csv)
-    assert_active_route_path(stage0_root, "Stage 23 Stage 0 root")
-    assert_active_route_path(stage3_root, "Stage 23 Stage 3 root")
-    assert_active_route_path(output_root, "Stage 23 output root", must_exist=False)
-    assert_active_route_path(stage2_pass_csv, "Stage 23 Stage 2 pass CSV")
-    assert_active_route_path(stage3_jobs_csv, "Stage 23 Stage 3 jobs CSV")
+    stage3_root = assert_active_route_path(
+        _resolve_mixed_path(args.stage3_root),
+        "Stage 23 Stage 3 root",
+    )
+    output_root = assert_active_route_path(
+        _resolve_mixed_path(args.output_root) if args.output_root else stage3_root,
+        "Stage 23 output root",
+        must_exist=False,
+    )
+    stage2_selection_csv = assert_active_route_path(
+        _resolve_mixed_path(args.stage2_selection_csv),
+        "Stage 23 Stage 2.5 selection CSV",
+    )
+    stage3_jobs_csv = assert_active_route_path(
+        _resolve_mixed_path(args.stage3_jobs_csv),
+        "Stage 23 Stage 3 jobs CSV",
+    )
+    _require_within(stage2_selection_csv, stage3_root, "Stage 23 Stage 2.5 selection CSV")
+    _require_within(stage3_jobs_csv, stage3_root, "Stage 23 Stage 3 jobs CSV")
+
     route_manifest_path, route_manifest, route_manifest_sha256 = load_route_manifest(stage3_root)
     validate_route_project_config(args.project_config, route_manifest)
-    source_route_provenance = route_provenance_fields(route_manifest_path, route_manifest, route_manifest_sha256)
-    if output_root.resolve() != stage3_root.resolve():
-        route_manifest_path, route_manifest, route_manifest_sha256 = write_route_manifest(output_root, route_manifest)
-    route_provenance = route_provenance_fields(route_manifest_path, route_manifest, route_manifest_sha256)
+    stage3_route_provenance = route_provenance_fields(
+        route_manifest_path,
+        route_manifest,
+        route_manifest_sha256,
+    )
+    aggregate_sources = _aggregate_source_manifest_lookup(route_manifest)
+    manifest_site_label, _, site_mapping_csv = _stage0_site_inputs(
+        route_manifest=route_manifest,
+        stage0_root=stage0_root,
+    )
+    site_numbers, hotspot_numbers = _load_site_mapping(site_mapping_csv)
 
-    stage2_pass_lookup = _strict_lookup_rows(_read_required_csv(stage2_pass_csv), "design_id", "Stage 2 pass")
-    stage3_job_lookup = _strict_lookup_rows(_read_required_csv(stage3_jobs_csv), "design_id", "Stage 3 job")
+    selection_rows = _read_required_csv(stage2_selection_csv)
+    stage2_selection_lookup = _strict_lookup_rows(
+        selection_rows,
+        "global_backbone_id",
+        "Stage 2.5 selection",
+    )
+    job_rows = _read_required_csv(stage3_jobs_csv)
+    stage3_job_lookup = _strict_lookup_rows(
+        job_rows,
+        "global_backbone_id",
+        "Stage 3 job",
+    )
+    _strict_lookup_rows(job_rows, "stage3_job_id", "Stage 3 job")
 
-    selected_backbones = _split_csv(args.selected_backbones)
-    if not selected_backbones:
-        raise RuntimeError("--selected-backbones must not be empty")
-    if len(selected_backbones) != len(set(selected_backbones)):
-        raise RuntimeError("--selected-backbones contains duplicate backbone IDs")
+    run_group_id = _single_value(job_rows, "run_group_id", "Stage 3 jobs")
+    protocol_identity_sha256 = _single_value(
+        job_rows,
+        "protocol_identity_sha256",
+        "Stage 3 jobs",
+    )
+    if len(protocol_identity_sha256) != 64:
+        raise RuntimeError("Stage 3 jobs protocol_identity_sha256 is not a full SHA-256 digest")
+    expected_run_group_id = f"stage3_{len(job_rows)}bp_{protocol_identity_sha256[:12]}"
+    if run_group_id != expected_run_group_id:
+        raise RuntimeError(
+            f"Stage 3 run_group_id formula mismatch: observed={run_group_id}, "
+            f"expected={expected_run_group_id}"
+        )
+    locked_stage3_mode = _single_value(job_rows, "stage3_mode", "Stage 3 jobs")
+    if locked_stage3_mode != args.stage3_mode:
+        raise RuntimeError(
+            f"--stage3-mode={args.stage3_mode} does not match jobs table mode={locked_stage3_mode}"
+        )
+    _single_value(job_rows, "input_pdb_dir", "Stage 3 jobs")
+    _single_value(job_rows, "output_pdb_dir", "Stage 3 jobs")
 
-    all_rows: list[dict[str, Any]] = []
-    last_site_numbers: set[str] = set()
-    last_hotspot_numbers: set[str] = set()
-    last_target_chain = "A"
-    last_peptide_chain = "B"
-    for backbone_id in selected_backbones:
-        backbone_row = stage2_pass_lookup.get(backbone_id)
+    stage2_selection_csv_sha256 = _sha256_file(stage2_selection_csv)
+    stage3_jobs_csv_sha256 = _sha256_file(stage3_jobs_csv)
+    expected_by_backbone: dict[str, dict[Path, tuple[Path, str]]] = {}
+    family_ids: set[str] = set()
+    for backbone_id, job_row in stage3_job_lookup.items():
+        backbone_row = stage2_selection_lookup.get(backbone_id)
         if backbone_row is None:
-            raise RuntimeError(f"Selected backbone not found in Stage 2 pass CSV: {backbone_id}")
+            raise RuntimeError(
+                f"Stage 3 job global backbone is absent from the Stage 2.5 selection CSV: {backbone_id}"
+            )
         if str(backbone_row.get("pass_backbone_qc", "")).strip().lower() != "true":
-            raise RuntimeError(f"Selected backbone is not marked pass_backbone_qc=true: {backbone_id}")
-        validate_row_route_provenance(backbone_row, source_route_provenance, f"Stage 23 Stage 2 row {backbone_id}")
-
-        site_label = str(backbone_row.get("site_label", ""))
-        site_mapping_csv = stage0_root / "00_target_inputs" / f"{_safe_token(site_label)}_crop_renumbering_mapping.csv"
-        site_numbers, hotspot_numbers = _load_site_mapping(site_mapping_csv)
-        last_site_numbers = site_numbers
-        last_hotspot_numbers = hotspot_numbers
-        last_target_chain = str(backbone_row.get("target_chain", "")).strip() or "A"
-        last_peptide_chain = str(backbone_row.get("peptide_chain", "")).strip() or "B"
-
-        job_row = stage3_job_lookup.get(backbone_id)
-        if job_row is None:
-            raise RuntimeError(f"Selected backbone has no Stage 3 job row: {backbone_id}")
-        validate_row_route_provenance(job_row, source_route_provenance, f"Stage 23 Stage 3 job {backbone_id}")
-        _validate_stage3_job_row(
+            raise RuntimeError(f"Stage 2.5 global backbone is not pass_backbone_qc=true: {backbone_id}")
+        if str(backbone_row.get("stage2_5_selected", "")).strip().lower() != "true":
+            raise RuntimeError(f"Stage 2.5 global backbone is not stage2_5_selected=true: {backbone_id}")
+        family_id = str(backbone_row.get("backbone_family_id", "")).strip()
+        if not family_id:
+            raise RuntimeError(f"Stage 2.5 global backbone has no backbone_family_id: {backbone_id}")
+        if family_id in family_ids:
+            raise RuntimeError(f"Stage 3 jobs contain more than one representative from family {family_id}")
+        family_ids.add(family_id)
+        if str(backbone_row.get("family_representative_global_backbone_id", "")).strip() != backbone_id:
+            raise RuntimeError(f"Stage 2.5 selected row is not its family representative: {backbone_id}")
+        if str(backbone_row.get("site_label", "")).strip() != manifest_site_label:
+            raise RuntimeError(
+                f"Stage 2.5 site label does not match the manifest-locked site for {backbone_id}"
+            )
+        _validate_cached_route_provenance(
+            backbone_row,
+            stage3_route_provenance,
+            f"Stage 23 Stage 2.5 row {backbone_id}",
+        )
+        _validate_cached_route_provenance(
+            job_row,
+            stage3_route_provenance,
+            f"Stage 23 Stage 3 job {backbone_id}",
+        )
+        expected_by_backbone[backbone_id] = _validate_stage3_job_row(
             backbone_id=backbone_id,
             backbone_row=backbone_row,
             job_row=job_row,
             expected_stage3_mode=args.stage3_mode,
+            stage3_root=stage3_root,
+            stage2_selection_csv=stage2_selection_csv,
+            stage2_selection_csv_sha256=stage2_selection_csv_sha256,
+            aggregate_sources=aggregate_sources,
         )
-        output_pdb_dir_text = str(job_row.get("output_pdb_dir", "")).strip()
-        if not output_pdb_dir_text:
-            raise RuntimeError(f"Stage 3 job is missing output_pdb_dir for {backbone_id}")
-        output_pdb_dir = _resolve_mixed_path(output_pdb_dir_text)
-        assert_active_route_path(output_pdb_dir, f"Stage 23 output PDB directory for {backbone_id}")
-        provenance = _stage3_job_provenance(job_row)
-        provenance.update(route_provenance)
-        relaxed_pdbs = _relaxed_pdbs_for_backbone(output_pdb_dir, backbone_id)
-        if not relaxed_pdbs:
-            missing_row = dict(backbone_row)
-            missing_row["design_id"] = backbone_id
-            all_rows.append(
-                {
-                    **provenance,
-                    "sequence_design_id": f"{backbone_id}_missing_stage3b_output",
-                    "backbone_id": backbone_id,
-                    "site_label": backbone_row.get("site_label", ""),
-                    "site_id": backbone_row.get("site_id", ""),
-                    "file_status": "fail_missing_stage3b_outputs",
-                    "parse_status": "not_parsed",
-                    "target_chain": last_target_chain,
-                    "peptide_chain": last_peptide_chain,
-                    "expected_peptide_length": backbone_row.get("peptide_length", ""),
-                    "forbidden_aas": args.forbidden_aas,
-                    "sequence_status": "not_evaluated",
-                    "pass_stage3c_qc": "false",
-                    "qc_failure_reasons": "missing_stage3b_outputs",
-                    "qc_notes": f"No Stage 3B PDBs found in {output_pdb_dir}",
-                }
-            )
-            continue
 
-        for relaxed_pdb in relaxed_pdbs:
+    _, runlist_tag_count = _validate_runlist_contract(
+        job_rows=job_rows,
+        stage3_root=stage3_root,
+    )
+    expected_output_count = sum(len(paths) for paths in expected_by_backbone.values())
+    observed_output_count = _validate_complete_stage3_outputs(expected_by_backbone)
+    if observed_output_count != expected_output_count:
+        raise RuntimeError(
+            "Stage 3B output count changed after completeness validation: "
+            f"expected={expected_output_count}, observed={observed_output_count}"
+        )
+
+    requested = _split_csv(args.selected_global_backbones)
+    if len(requested) != len(set(requested)):
+        raise RuntimeError("--selected-global-backbones contains duplicate global backbone IDs")
+    if requested:
+        missing_requested = sorted(set(requested) - set(stage3_job_lookup))
+        if missing_requested:
+            raise RuntimeError(
+                "Requested global backbone IDs are absent from the authoritative Stage 3 jobs table: "
+                f"{missing_requested[:10]}"
+            )
+        requested_set = set(requested)
+        selected_backbones = [
+            str(row["global_backbone_id"]).strip()
+            for row in job_rows
+            if str(row["global_backbone_id"]).strip() in requested_set
+        ]
+    else:
+        selected_backbones = [str(row["global_backbone_id"]).strip() for row in job_rows]
+    if not selected_backbones:
+        raise RuntimeError("No global backbone IDs were selected from the Stage 3 jobs table")
+
+    if output_root.resolve() != stage3_root.resolve():
+        output_manifest_path, output_manifest, output_manifest_sha256 = write_route_manifest(
+            output_root,
+            route_manifest,
+        )
+        output_route_provenance = route_provenance_fields(
+            output_manifest_path,
+            output_manifest,
+            output_manifest_sha256,
+        )
+    else:
+        output_route_provenance = stage3_route_provenance
+
+    output_dir = output_root / "05_proteinmpnn_sequences" / "stage3c" / _safe_token(run_group_id)
+    fasta_dir = output_dir / "fasta"
+    output_prefix = f"FGA_rfpeptides_{_safe_token(run_group_id)}_stage3C"
+
+    all_rows: list[dict[str, Any]] = []
+    target_chains: set[str] = set()
+    peptide_chains: set[str] = set()
+    for backbone_id in selected_backbones:
+        backbone_row = stage2_selection_lookup[backbone_id]
+        job_row = stage3_job_lookup[backbone_id]
+        target_chains.add(str(backbone_row.get("target_chain", "")).strip() or "A")
+        peptide_chains.add(str(backbone_row.get("peptide_chain", "")).strip() or "B")
+        expected_outputs = expected_by_backbone[backbone_id]
+        provenance = _stage3_job_provenance(
+            job_row,
+            stage3_jobs_csv=stage3_jobs_csv,
+            stage3_jobs_csv_sha256=stage3_jobs_csv_sha256,
+            expected_count=len(expected_outputs),
+            observed_count=len(expected_outputs),
+        )
+        provenance.update(output_route_provenance)
+        for relaxed_pdb, (input_pdb, _) in sorted(
+            expected_outputs.items(),
+            key=lambda item: str(item[0]),
+        ):
             assert_active_route_path(relaxed_pdb, f"Stage 23 Stage 3B PDB for {backbone_id}")
             qc_row = _qc_row_for_relaxed_pdb(
                 relaxed_pdb=relaxed_pdb,
@@ -1081,35 +1519,55 @@ def main() -> int:
                 macrocycle_warn_distance=args.macrocycle_warn_distance,
                 forbidden_aas=args.forbidden_aas,
             )
+            qc_row["stage3_input_pdb"] = input_pdb
+            qc_row["stage3_input_pdb_sha256"] = _sha256_file(input_pdb)
             qc_row.update(provenance)
             all_rows.append(qc_row)
 
+    if len(target_chains) != 1 or len(peptide_chains) != 1:
+        raise RuntimeError(
+            "Selected Stage 3 jobs do not share one target/peptide chain contract: "
+            f"target={sorted(target_chains)}, peptide={sorted(peptide_chains)}"
+        )
+    target_chain = next(iter(target_chains))
+    peptide_chain = next(iter(peptide_chains))
     pass_rows = [row for row in all_rows if row.get("pass_stage3c_qc") == "true"]
-    write_csv(output_dir / f"FGA_rfpeptides_stage3{output_name_suffix}_sequences_qc.csv", all_rows, STAGE3C_FIELDS)
-    write_csv(output_dir / f"FGA_rfpeptides_stage3{output_name_suffix}_sequences_qc_pass.csv", pass_rows, STAGE3C_FIELDS)
+    write_csv(output_dir / f"{output_prefix}_sequences_qc.csv", all_rows, STAGE3C_FIELDS)
+    write_csv(output_dir / f"{output_prefix}_sequences_qc_pass.csv", pass_rows, STAGE3C_FIELDS)
     _write_fastas(all_rows, fasta_dir)
     write_markdown(
-        output_dir / f"FGA_rfpeptides_stage3{output_name_suffix}_sequences_qc.md",
+        output_dir / f"{output_prefix}_sequences_qc.md",
         _summary_markdown(
             rows=all_rows,
             args=args,
             output_dir=output_dir,
-            site_numbers=last_site_numbers,
-            hotspot_numbers=last_hotspot_numbers,
+            site_numbers=site_numbers,
+            hotspot_numbers=hotspot_numbers,
+            run_group_id=run_group_id,
+            stage2_selection_csv=stage2_selection_csv,
+            stage3_jobs_csv=stage3_jobs_csv,
+            job_count=len(job_rows),
+            selected_backbone_count=len(selected_backbones),
+            expected_output_count=expected_output_count,
         ),
     )
     _write_pymol_review(
         rows=all_rows,
-        output_path=output_dir / f"RFpep_Site_2_stage3C{output_name_suffix}_sequence_qc_review.pml",
-        target_chain=last_target_chain,
-        peptide_chain=last_peptide_chain,
-        site_numbers=last_site_numbers,
-        hotspot_numbers=last_hotspot_numbers,
+        output_path=output_dir
+        / f"{_safe_token(manifest_site_label)}_{_safe_token(run_group_id)}_stage3C_sequence_qc_review.pml",
+        target_chain=target_chain,
+        peptide_chain=peptide_chain,
+        site_numbers=site_numbers,
+        hotspot_numbers=hotspot_numbers,
         top_n=args.top_pymol,
         pymol_path_style=args.pymol_path_style,
     )
 
-    logger.info("Parsed Stage 3B relaxed PDBs: %s", len(all_rows))
+    logger.info("Authoritative Stage 3 jobs: %s", len(job_rows))
+    logger.info("Runlist input tags validated: %s", runlist_tag_count)
+    logger.info("Complete Stage 3B output set validated: %s", expected_output_count)
+    logger.info("Selected global backbones collected: %s", len(selected_backbones))
+    logger.info("Parsed Stage 3B PDBs: %s", len(all_rows))
     logger.info("Passed Stage 3C sequence/relax QC: %s", len(pass_rows))
     logger.info("Output directory: %s", output_dir)
     if not pass_rows:
