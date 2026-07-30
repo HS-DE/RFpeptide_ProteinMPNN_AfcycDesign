@@ -58,61 +58,110 @@ def _write_complex(path: Path, target_chain: str = "A", peptide_chain: str = "B"
 
 class Stage3ProvenanceTests(unittest.TestCase):
     def _prepare_fixture(self, root: Path) -> tuple[Path, Path, list[str]]:
-        stage2_root = root / "stage2"
-        stage2_root.mkdir(parents=True, exist_ok=True)
+        source_root = root / "source_stage2"
+        source_root.mkdir(parents=True, exist_ok=True)
+        stage2_5_root = root / "stage2_5"
+        stage2_5_root.mkdir(parents=True, exist_ok=True)
         target_pdb = root / "stage0_target.pdb"
         mapping_csv = root / "stage0_mapping.csv"
         target_pdb.write_text("ATOM\nEND\n", encoding="utf-8")
         mapping_csv.write_text("rfpeptides_chain,rfpeptides_residue_number\nA,1\n", encoding="utf-8")
         _, config_sha, effective_sha = common.load_active_route_config(ACTIVE_CONFIG)
         hotspots = ["A82", "A84", "A85", "A86"]
-        manifest_payload = {
-                "batch_id": "stage3_fixture",
-                "site_labels": ["RFpep_Site_2"],
-                "protocol_peptide_length_min": 12,
-                "protocol_peptide_length_max": 24,
-                "run_peptide_length_min": 12,
-                "run_peptide_length_max": 18,
-                "num_designs_requested": 3,
-                "project_config": str(ACTIVE_CONFIG),
-                "project_config_sha256": config_sha,
-                "effective_project_config_sha256": effective_sha,
-                "stage0_sites": [
+        source_manifest_payload = {
+            "batch_id": "stage3_source_fixture",
+            "site_labels": ["RFpep_Site_2"],
+            "protocol_peptide_length_min": 12,
+            "protocol_peptide_length_max": 24,
+            "run_peptide_length_min": 12,
+            "run_peptide_length_max": 18,
+            "num_designs_requested": 3,
+            "project_config": str(ACTIVE_CONFIG),
+            "project_config_sha256": config_sha,
+            "effective_project_config_sha256": effective_sha,
+            "stage0_sites": [
+                {
+                    "site_label": "RFpep_Site_2",
+                    "target_pdb": str(target_pdb),
+                    "target_pdb_sha256": common.sha256_file(target_pdb),
+                    "mapping_csv": str(mapping_csv),
+                    "mapping_csv_sha256": common.sha256_file(mapping_csv),
+                    "normalized_hotspots": hotspots,
+                    "normalized_hotspots_sha256": common.canonical_json_sha256(hotspots),
+                }
+            ],
+        }
+        if (source_root / "route_manifest.json").exists():
+            source_path, source_manifest, source_sha = common.load_route_manifest(source_root)
+        else:
+            source_path, source_manifest, source_sha = common.write_route_manifest(
+                source_root,
+                source_manifest_payload,
+            )
+        aggregate_payload = dict(source_manifest_payload)
+        aggregate_payload.update(
+            {
+                "batch_id": "stage3_stage2_5_fixture",
+                "source_route_manifests": [
                     {
-                        "site_label": "RFpep_Site_2",
-                        "target_pdb": str(target_pdb),
-                        "target_pdb_sha256": common.sha256_file(target_pdb),
-                        "mapping_csv": str(mapping_csv),
-                        "mapping_csv_sha256": common.sha256_file(mapping_csv),
-                        "normalized_hotspots": hotspots,
-                        "normalized_hotspots_sha256": common.canonical_json_sha256(hotspots),
+                        "run_id": source_manifest["run_id"],
+                        "batch_id": source_manifest["batch_id"],
+                        "manifest_path": str(source_path),
+                        "manifest_sha256": source_sha,
                     }
                 ],
+                "stage2_5_source_count": 1,
+                "stage2_5_operation": "fixture_global_identity_merge",
             }
-        if (stage2_root / "route_manifest.json").exists():
-            manifest_path, manifest, manifest_sha = common.load_route_manifest(stage2_root)
+        )
+        if (stage2_5_root / "route_manifest.json").exists():
+            manifest_path, manifest, manifest_sha = common.load_route_manifest(stage2_5_root)
         else:
-            manifest_path, manifest, manifest_sha = common.write_route_manifest(stage2_root, manifest_payload)
+            manifest_path, manifest, manifest_sha = common.write_route_manifest(
+                stage2_5_root,
+                aggregate_payload,
+            )
         route_provenance = common.route_provenance_fields(manifest_path, manifest, manifest_sha)
-        ids = ["RFpep_Site_2_0002", "RFpep_Site_2_0017", "RFpep_Site_2_0018"]
+        source_provenance = {
+            "source_run_id": source_manifest["run_id"],
+            "source_batch_id": source_manifest["batch_id"],
+            "source_route_manifest": str(source_path),
+            "source_route_manifest_sha256": source_sha,
+        }
+        local_ids = ["RFpep_Site_2_0002", "RFpep_Site_2_0017", "RFpep_Site_2_0018"]
+        global_ids = [f"{source_manifest['run_id']}__{local_id}" for local_id in local_ids]
         rows = []
-        for idx, design_id in enumerate(ids, start=1):
-            pdb_path = root / f"{design_id}.pdb"
+        for idx, (local_id, global_id) in enumerate(zip(local_ids, global_ids), start=1):
+            pdb_path = source_root / "02_rfpeptides_backbones" / f"{local_id}.pdb"
+            pdb_path.parent.mkdir(parents=True, exist_ok=True)
             _write_complex(pdb_path)
             rows.append(
                 {
-                    "design_id": design_id,
+                    "global_backbone_id": global_id,
+                    "source_local_design_id": local_id,
+                    "source_batch_label": "batch01",
+                    "source_stage2_root": str(source_root),
+                    "source_route_run_id": source_manifest["run_id"],
+                    "source_route_batch_id": source_manifest["batch_id"],
+                    "backbone_family_id": f"S25_L{12 + idx:02d}_F0001",
+                    "family_representative_global_backbone_id": global_id,
+                    "stage2_5_selected": "true",
+                    "stage2_5_selection_rank": str(idx),
+                    "design_id": local_id,
                     "site_label": "RFpep_Site_2",
                     "site_id": "site2",
                     "rf_pdb": str(pdb_path),
+                    "pdb_sha256": common.sha256_file(pdb_path),
                     "peptide_chain": "B",
                     "target_chain": "A",
                     "pass_backbone_qc": "true",
                     "peptide_length": str(12 + idx),
                     **route_provenance,
+                    **source_provenance,
                 }
             )
-        pass_csv = root / "stage2_pass.csv"
+        pass_csv = stage2_5_root / "04_backbone_diversity" / "stage2_5_selected.csv"
+        pass_csv.parent.mkdir(parents=True, exist_ok=True)
         with pass_csv.open("w", encoding="utf-8", newline="") as handle:
             writer = csv.DictWriter(handle, fieldnames=list(rows[0]))
             writer.writeheader()
@@ -125,26 +174,24 @@ class Stage3ProvenanceTests(unittest.TestCase):
         checkpoint.parent.mkdir(parents=True, exist_ok=True)
         runner.write_text("print('fixture')\n", encoding="utf-8")
         checkpoint.write_bytes(b"fixture checkpoint")
-        return stage2_root, pass_csv, ids
+        return stage2_5_root, pass_csv, global_ids
 
     def _run_stage22(self, root: Path, output_name: str, temperature: float = 0.1) -> list[dict[str, str]]:
-        stage2_root, pass_csv, ids = self._prepare_fixture(root)
+        stage2_5_root, pass_csv, ids = self._prepare_fixture(root)
         output_root = root / output_name
         logger = logging.getLogger(f"stage22_fixture_{id(root)}")
         logger.handlers.clear()
         logger.addHandler(logging.NullHandler())
         argv = [
             "22_prepare_proteinmpnn_jobs.py",
-            "--stage2-root",
-            str(stage2_root),
+            "--stage2-5-root",
+            str(stage2_5_root),
             "--output-root",
             str(output_root),
             "--project-config",
             str(ACTIVE_CONFIG),
-            "--stage2-pass-csv",
+            "--stage2-selection-csv",
             str(pass_csv),
-            "--selected-backbones",
-            ",".join(ids),
             "--dl-binder-design-root",
             str(root / "dl_binder_design"),
             "--temperature",
@@ -167,13 +214,19 @@ class Stage3ProvenanceTests(unittest.TestCase):
             changed_rows = self._run_stage22(root, "output_c", temperature=0.2)
 
         self.assertEqual(len(rows), 3)
-        self.assertEqual({row["design_id"] for row in rows}, {"RFpep_Site_2_0002", "RFpep_Site_2_0017", "RFpep_Site_2_0018"})
+        self.assertEqual(
+            {row["source_local_design_id"] for row in rows},
+            {"RFpep_Site_2_0002", "RFpep_Site_2_0017", "RFpep_Site_2_0018"},
+        )
+        self.assertEqual({row["design_id"] for row in rows}, {row["global_backbone_id"] for row in rows})
         self.assertTrue(all("," not in row["design_id"] for row in rows))
         self.assertTrue(all(row["design_id"] == row["backbone_id"] for row in rows))
         self.assertTrue(all("0007" not in row["stage3_job_id"] for row in rows))
         self.assertEqual({row["run_group_id"] for row in rows}, {same_rows[0]["run_group_id"]})
         self.assertNotEqual(rows[0]["run_group_id"], changed_rows[0]["run_group_id"])
-        self.assertTrue(all(Path(row["source_backbone_pdb"]).stem == row["design_id"] for row in rows))
+        self.assertTrue(
+            all(Path(row["source_backbone_pdb"]).stem == row["source_local_design_id"] for row in rows)
+        )
 
     def test_stage23_rejects_duplicate_and_aggregate_rows(self) -> None:
         with self.assertRaisesRegex(RuntimeError, "Duplicate Stage 3 job"):
@@ -182,6 +235,19 @@ class Stage3ProvenanceTests(unittest.TestCase):
             )
         with self.assertRaisesRegex(RuntimeError, "aggregate"):
             stage23._strict_lookup_rows([{"design_id": "A,B"}], "design_id", "Stage 3 job")
+
+    def test_stage22_rejects_source_manifest_outside_aggregate_route(self) -> None:
+        with self.assertRaisesRegex(RuntimeError, "not listed"):
+            stage22._validate_aggregate_source_membership(
+                {
+                    "source_run_id": "rfp_unlisted",
+                    "source_batch_id": "batch_unlisted",
+                    "source_route_manifest_sha256": "0" * 64,
+                },
+                Path("unlisted_route_manifest.json"),
+                {},
+                "fixture",
+            )
 
 
 class PdbNormalizationTests(unittest.TestCase):

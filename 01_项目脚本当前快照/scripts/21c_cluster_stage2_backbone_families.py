@@ -9,7 +9,24 @@ from typing import Any, Iterable, Mapping, Sequence
 
 import numpy as np
 
-from common import append_run_header, read_csv, resolve_path, rows_to_markdown, setup_logger, write_csv, write_markdown
+from common import (
+    ROUTE_PROVENANCE_FIELDS,
+    SOURCE_ROUTE_PROVENANCE_FIELDS,
+    assert_active_route_path,
+    append_run_header,
+    load_route_manifest,
+    read_csv,
+    resolve_path,
+    route_provenance_fields,
+    rows_to_markdown,
+    setup_logger,
+    sha256_file,
+    validate_route_project_config,
+    validate_row_route_provenance,
+    write_csv,
+    write_markdown,
+    write_route_manifest,
+)
 from pdb_utils import ca_coord, parse_residues
 
 
@@ -46,7 +63,7 @@ FAMILY_SUMMARY_FIELDS = [
     "macrocycle_terminal_cn_distance",
     "selected_for_stage3_screen",
     "stage2_5_selection_rank",
-]
+] + ROUTE_PROVENANCE_FIELDS
 
 
 def _resolve_mixed_path(value: str | Path) -> Path:
@@ -57,6 +74,153 @@ def _resolve_mixed_path(value: str | Path) -> Path:
         return Path(f"/mnt/{text[0].lower()}{text[2:]}")
     path = Path(text)
     return path if path.is_absolute() else resolve_path(path)
+
+
+def _validate_all_route_rows(
+    rows: list[dict[str, str]],
+    expected: Mapping[str, str],
+    label: str,
+) -> None:
+    validate_row_route_provenance(rows[0], expected, f"{label} row 1")
+    expected_manifest = assert_active_route_path(expected["route_manifest_path"], f"{label} route manifest")
+    for index, row in enumerate(rows, start=1):
+        row_label = f"{label} row {index}"
+        for field in ROUTE_PROVENANCE_FIELDS:
+            observed = str(row.get(field, "")).strip()
+            if field == "route_manifest_path":
+                observed_path = assert_active_route_path(observed, f"{row_label} route manifest")
+                if observed_path.resolve() != expected_manifest.resolve():
+                    raise RuntimeError(
+                        f"{row_label} route manifest path mismatch: "
+                        f"observed={observed_path}, expected={expected_manifest}"
+                    )
+            elif observed != str(expected[field]):
+                raise RuntimeError(
+                    f"{row_label} route provenance mismatch for {field}: "
+                    f"observed={observed!r}, expected={expected[field]!r}"
+                )
+
+
+def _load_source_manifest_expectations(
+    aggregate_manifest: Mapping[str, Any],
+) -> dict[Path, dict[str, str]]:
+    records = aggregate_manifest.get("source_route_manifests")
+    if not isinstance(records, list) or not records:
+        raise RuntimeError("Stage 2.5 aggregate route manifest has no source_route_manifests")
+    expected_count = int(aggregate_manifest.get("stage2_5_source_count", len(records)))
+    if len(records) != expected_count:
+        raise RuntimeError(
+            f"Stage 2.5 source manifest count mismatch: records={len(records)}, expected={expected_count}"
+        )
+
+    compatibility_fields = [
+        "route_name",
+        "route_protocol_version",
+        "hotspot_mapping_version",
+        "production_route",
+        "cyclization",
+        "site_labels",
+        "protocol_peptide_length_min",
+        "protocol_peptide_length_max",
+        "run_peptide_length_min",
+        "run_peptide_length_max",
+        "project_config_sha256",
+        "effective_project_config_sha256",
+        "stage0_sites",
+        "stage1_protocol",
+        "rfpeptides_runtime",
+    ]
+    expectations: dict[Path, dict[str, str]] = {}
+    seen_run_ids: set[str] = set()
+    seen_batch_ids: set[str] = set()
+    for record_index, record in enumerate(records, start=1):
+        if not isinstance(record, Mapping):
+            raise RuntimeError(f"Invalid source route manifest record {record_index}")
+        missing = [
+            field
+            for field in ["run_id", "batch_id", "manifest_path", "manifest_sha256"]
+            if not str(record.get(field, "")).strip()
+        ]
+        if missing:
+            raise RuntimeError(f"Source route manifest record {record_index} is missing {missing}")
+        manifest_path = assert_active_route_path(
+            str(record["manifest_path"]),
+            f"Stage 21c source route manifest {record_index}",
+        )
+        actual_sha256 = sha256_file(manifest_path)
+        if actual_sha256 != str(record["manifest_sha256"]):
+            raise RuntimeError(
+                f"Source route manifest SHA-256 mismatch for {manifest_path}: "
+                f"actual={actual_sha256}, expected={record['manifest_sha256']}"
+            )
+        loaded_path, source_manifest, loaded_sha256 = load_route_manifest(manifest_path.parent)
+        if loaded_path.resolve() != manifest_path.resolve() or loaded_sha256 != actual_sha256:
+            raise RuntimeError(f"Source route manifest changed during validation: {manifest_path}")
+        if str(source_manifest["run_id"]) != str(record["run_id"]):
+            raise RuntimeError(f"Source route manifest run_id mismatch: {manifest_path}")
+        if str(source_manifest["batch_id"]) != str(record["batch_id"]):
+            raise RuntimeError(f"Source route manifest batch_id mismatch: {manifest_path}")
+        for field in compatibility_fields:
+            if source_manifest.get(field) != aggregate_manifest.get(field):
+                raise RuntimeError(
+                    f"Source route manifest {manifest_path} is incompatible with aggregate manifest for {field}"
+                )
+        run_id = str(source_manifest["run_id"])
+        batch_id = str(source_manifest["batch_id"])
+        if run_id in seen_run_ids or batch_id in seen_batch_ids:
+            raise RuntimeError(f"Duplicate source route run/batch identity in aggregate manifest: {manifest_path}")
+        seen_run_ids.add(run_id)
+        seen_batch_ids.add(batch_id)
+        expectations[manifest_path.resolve()] = {
+            "source_run_id": run_id,
+            "source_batch_id": batch_id,
+            "source_route_manifest": str(manifest_path),
+            "source_route_manifest_sha256": actual_sha256,
+        }
+    return expectations
+
+
+def _validate_all_source_rows(
+    rows: list[dict[str, str]],
+    expectations: Mapping[Path, Mapping[str, str]],
+) -> None:
+    for index, row in enumerate(rows, start=1):
+        row_label = f"Stage 21c Stage 2.5 row {index}"
+        missing = [field for field in SOURCE_ROUTE_PROVENANCE_FIELDS if not str(row.get(field, "")).strip()]
+        if missing:
+            raise RuntimeError(f"{row_label} is missing source route provenance fields: {missing}")
+        manifest_path = assert_active_route_path(
+            str(row["source_route_manifest"]),
+            f"{row_label} source route manifest",
+        ).resolve()
+        expected = expectations.get(manifest_path)
+        if expected is None:
+            raise RuntimeError(f"{row_label} references a source manifest not listed by the aggregate route: {manifest_path}")
+        source_stage2_root = assert_active_route_path(
+            str(row.get("source_stage2_root", "")),
+            f"{row_label} source Stage 2 root",
+        )
+        if source_stage2_root.resolve() != manifest_path.parent.resolve():
+            raise RuntimeError(
+                f"{row_label} source_stage2_root does not contain its source route manifest"
+            )
+        for field in SOURCE_ROUTE_PROVENANCE_FIELDS:
+            observed = str(row.get(field, "")).strip()
+            expected_value = str(expected[field])
+            if field == "source_route_manifest":
+                observed = str(manifest_path)
+                expected_value = str(
+                    assert_active_route_path(expected_value, f"{row_label} expected source manifest").resolve()
+                )
+            if observed != expected_value:
+                raise RuntimeError(
+                    f"{row_label} source route provenance mismatch for {field}: "
+                    f"observed={observed!r}, expected={expected_value!r}"
+                )
+        if str(row.get("source_route_run_id", "")).strip() != str(expected["source_run_id"]):
+            raise RuntimeError(f"{row_label} legacy source_route_run_id disagrees with source manifest")
+        if str(row.get("source_route_batch_id", "")).strip() != str(expected["source_batch_id"]):
+            raise RuntimeError(f"{row_label} legacy source_route_batch_id disagrees with source manifest")
 
 
 def _as_float(value: Any, default: float) -> float:
@@ -319,15 +483,20 @@ def main() -> int:
         description="Cluster Stage 2 QC-pass cyclic backbones and select a batch/length-balanced diversity panel."
     )
     parser.add_argument(
+        "--stage2-5-root",
+        required=True,
+    )
+    parser.add_argument(
+        "--project-config",
+        required=True,
+    )
+    parser.add_argument(
         "--manifest-pass-csv",
         required=True,
     )
     parser.add_argument(
         "--stage0-target-pdb",
-        default=(
-            "results/rfpeptides_article_route_clean_20260615_fpocket/"
-            "00_target_inputs/RFpep_Site_2_target.pdb"
-        ),
+        required=True,
     )
     parser.add_argument(
         "--output-root",
@@ -346,23 +515,85 @@ def main() -> int:
     if args.max_selected <= 0 or args.max_per_batch_length <= 0:
         raise RuntimeError("--max-selected and --max-per-batch-length must be > 0")
 
-    manifest_path = _resolve_mixed_path(args.manifest_pass_csv)
+    stage2_5_root = assert_active_route_path(
+        _resolve_mixed_path(args.stage2_5_root),
+        "Stage 21c Stage 2.5 root",
+    )
+    output_root = assert_active_route_path(
+        _resolve_mixed_path(args.output_root),
+        "Stage 21c output root",
+        must_exist=False,
+    )
+    input_route_manifest_path, input_route_manifest, input_route_manifest_sha256 = load_route_manifest(stage2_5_root)
+    validate_route_project_config(args.project_config, input_route_manifest)
+    input_route_provenance = route_provenance_fields(
+        input_route_manifest_path,
+        input_route_manifest,
+        input_route_manifest_sha256,
+    )
+    source_expectations = _load_source_manifest_expectations(input_route_manifest)
+
+    manifest_path = assert_active_route_path(
+        _resolve_mixed_path(args.manifest_pass_csv),
+        "Stage 21c Stage 2.5 pass manifest CSV",
+    )
+    try:
+        manifest_path.resolve().relative_to(stage2_5_root.resolve())
+    except ValueError as exc:
+        raise RuntimeError(
+            f"Stage 21c pass manifest must be inside its Stage 2.5 root: {manifest_path}"
+        ) from exc
     rows = [dict(row) for row in read_csv(manifest_path)]
     if not rows:
         raise RuntimeError(f"Missing or empty Stage 2.5 pass manifest: {manifest_path}")
+    _validate_all_route_rows(rows, input_route_provenance, "Stage 21c aggregate route")
+    _validate_all_source_rows(rows, source_expectations)
     if any(str(row.get("pass_backbone_qc", "")).lower() != "true" for row in rows):
         raise RuntimeError("The Stage 2.5 pass manifest contains a row that did not pass Stage 2 QC")
     global_ids = [str(row.get("global_backbone_id", "")).strip() for row in rows]
     if not all(global_ids) or len(set(global_ids)) != len(global_ids):
         raise RuntimeError("Stage 2.5 pass manifest has blank or duplicate global_backbone_id values")
 
-    stage0_target_pdb = _resolve_mixed_path(args.stage0_target_pdb)
+    stage0_target_pdb = assert_active_route_path(
+        _resolve_mixed_path(args.stage0_target_pdb),
+        "Stage 21c Stage 0 target PDB",
+    )
+    stage0_site = input_route_manifest["stage0_sites"][0]
+    manifest_stage0_target = assert_active_route_path(
+        stage0_site["target_pdb"],
+        "Stage 21c manifest Stage 0 target PDB",
+    )
+    if stage0_target_pdb.resolve() != manifest_stage0_target.resolve():
+        raise RuntimeError(
+            f"Supplied Stage 0 target PDB differs from aggregate route manifest: "
+            f"supplied={stage0_target_pdb}, manifest={manifest_stage0_target}"
+        )
+    if sha256_file(stage0_target_pdb) != str(stage0_site["target_pdb_sha256"]):
+        raise RuntimeError("Supplied Stage 0 target PDB SHA-256 differs from aggregate route manifest")
     stage0_chains = parse_residues(stage0_target_pdb)
     if "A" not in stage0_chains:
         raise RuntimeError(f"Stage 0 target PDB lacks chain A: {stage0_target_pdb}")
     reference_target_ca = _ca_coords(stage0_chains["A"], f"Stage 0 target {stage0_target_pdb}")
 
     for index, row in enumerate(rows, start=1):
+        source_pdb = assert_active_route_path(
+            _resolve_mixed_path(str(row.get("rf_pdb", ""))),
+            f"Stage 21c source backbone PDB {row.get('global_backbone_id', index)}",
+        )
+        source_stage2_root = assert_active_route_path(
+            _resolve_mixed_path(str(row.get("source_stage2_root", ""))),
+            f"Stage 21c source Stage 2 root {row.get('global_backbone_id', index)}",
+        )
+        try:
+            source_pdb.resolve().relative_to(source_stage2_root.resolve())
+        except ValueError as exc:
+            raise RuntimeError(
+                f"Stage 21c source backbone PDB is outside its source Stage 2 root: {source_pdb}"
+            ) from exc
+        if sha256_file(source_pdb) != str(row.get("pdb_sha256", "")):
+            raise RuntimeError(
+                f"Stage 21c source backbone PDB SHA-256 mismatch for {row.get('global_backbone_id')}"
+            )
         peptide_ca, target_rmsd = _load_aligned_peptide(row, reference_target_ca)
         row["_aligned_peptide_ca"] = peptide_ca
         row["target_alignment_ca_rmsd_A"] = round(target_rmsd, 3)
@@ -379,6 +610,21 @@ def main() -> int:
     selected_ranks = {
         str(family["family_id"]): rank for rank, family in enumerate(selected_families, start=1)
     }
+
+    if output_root.resolve() == stage2_5_root.resolve():
+        output_route_provenance = input_route_provenance
+    else:
+        output_manifest_path, output_manifest, output_manifest_sha256 = write_route_manifest(
+            output_root,
+            input_route_manifest,
+        )
+        output_route_provenance = route_provenance_fields(
+            output_manifest_path,
+            output_manifest,
+            output_manifest_sha256,
+        )
+    for row in rows:
+        row.update(output_route_provenance)
 
     family_summary: list[dict[str, Any]] = []
     for family in families:
@@ -432,6 +678,7 @@ def main() -> int:
                 "macrocycle_terminal_cn_distance": representative.get("macrocycle_terminal_cn_distance", ""),
                 "selected_for_stage3_screen": "true" if family_id in selected_family_ids else "false",
                 "stage2_5_selection_rank": selected_ranks.get(family_id, ""),
+                **output_route_provenance,
             }
         )
 
@@ -439,7 +686,7 @@ def main() -> int:
         [row for row in rows if row.get("stage2_5_selected") == "true"],
         key=lambda row: _as_int(row.get("stage2_5_selection_rank", 0)),
     )
-    output_dir = _resolve_mixed_path(args.output_root) / "04_backbone_diversity"
+    output_dir = output_root / "04_backbone_diversity"
     original_fields = [field for field in rows[0].keys() if not field.startswith("_")]
     output_fields = FAMILY_FIELDS + [field for field in original_fields if field not in FAMILY_FIELDS]
     write_csv(output_dir / "FGA_rfpeptides_stage2_5_backbone_family_members.csv", rows, output_fields)

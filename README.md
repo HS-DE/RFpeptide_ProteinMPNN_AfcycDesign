@@ -1,6 +1,6 @@
 # FGA 环肽路线脚本人工检查包
 
-快照日期：2026-07-22
+快照日期：2026-07-30
 
 这个目录用于人工复核，不是新的运行目录。请先阅读本文件，再查看
 `脚本逐项清单.csv` 和 `SHA256SUMS.csv`。
@@ -58,9 +58,9 @@ Stage 20-31 现在只接受完整的活跃配置：
 | `19_prepare_rfpeptides_article_inputs.py` | Stage 0 | 生成 target crop、hotspot 定义和 crop renumbering mapping |
 | `20_make_rfpeptides_article_jobs.py` | Stage 1 准备 | 生成 RFpeptides shell runner，并在启动前验证 hotspot index 已加 binder length |
 | `21_collect_rfpeptides_backbones.py` | Stage 2 | 解析 PDB/TRB、按 target-chain order 映射 Site_2/hotspot、检查 direct contact、宏环几何和 clash |
-| `21b_build_stage2_global_backbone_manifest.py` | Stage 2.5A | 合并多批 Stage 2 结果，以 route run + local ID 建立全局 backbone 主键，并审计 PDB/坐标重复 |
-| `21c_cluster_stage2_backbone_families.py` | Stage 2.5B | 在 target 对齐坐标系中按 cyclic-shift-minimized peptide CA RMSD 建立 family，并做批次/长度平衡筛选 |
-| `22_prepare_proteinmpnn_jobs.py` | Stage 3A | 从 Stage 2 pass backbone 准备 ProteinMPNN-only 或 ProteinMPNN-FastRelax jobs |
+| `21b_build_stage2_global_backbone_manifest.py` | Stage 2.5A | 严格核验并合并多批 Stage 2 route manifest/逐行 provenance，以 source route run + local ID 建立全局 backbone 主键，并审计 PDB/坐标重复 |
+| `21c_cluster_stage2_backbone_families.py` | Stage 2.5B | 强制显式 Stage 0 target、核验聚合与源 provenance，在 target 对齐坐标系中按 cyclic-shift-minimized peptide CA RMSD 建立 family，并做批次/长度平衡筛选 |
+| `22_prepare_proteinmpnn_jobs.py` | Stage 3A | 读取 Stage 2.5 selected table，以 `global_backbone_id` 为唯一主键准备 ProteinMPNN-only 或 ProteinMPNN-FastRelax jobs |
 | `23_collect_proteinmpnn_sequences.py` | Stage 3C | 收集 ProteinMPNN 输出并重新检查序列、Site_2/hotspot、宏环和 clash |
 | `24_stage3d1_sidechain_repack.py` | Stage 3D-1 | PyRosetta side-chain repack-only，不移动 backbone |
 | `25_stage4_rosetta_interface_scoring.py` | Stage 4A-v2 | no-repack/no-minimization Rosetta score proxy、序列性质和 validation priority |
@@ -183,3 +183,29 @@ Stage 3，也不能据此直接扩大生产。
 
 `08_运行时分叉与修复证据/RFpep_Site_2_L17_17_0.pdb` 是较早 N1-v2
 runtime-fix 参考，不应替代 N1-v3 的完整端到端证据。
+
+## 2026-07-30 当前生产状态
+
+修正路线已完成 6 批、每批 2,000 条 Stage 1 生成，并对全部 12,000 条执行
+严格 Stage 2；其中 1,937 条通过 provenance、Site_2/hotspot、宏环与 clash
+门槛。Stage 2.5 将其聚为 1,658 个 family，并按批次和长度平衡选出 312 条
+互不重复的 family representative。
+
+`21b` 现在为 Stage 2.5 写出聚合 `route_manifest.json`，同时保留并核验六个
+源 manifest。`21c` 不再提供历史 Stage 0 默认路径，生产调用必须显式传入
+`--stage2-5-root`、`--project-config`、`--manifest-pass-csv`、
+`--stage0-target-pdb` 和 `--output-root`。
+
+`22_prepare_proteinmpnn_jobs.py` 已用该 312 条清单完成 Stage 3A 准备：
+
+```text
+312 selected rows
+312 unique global_backbone_id
+312 unique backbone_family_id
+312 normalized ProteinMPNN input PDBs
+312 runlist tags
+```
+
+Stage 3A 只准备输入与运行脚本，没有执行 ProteinMPNN。生成的
+`design_id`、`backbone_id`、输入标签和 job identity 均使用
+`global_backbone_id`；原批次内 ID 只保留为 `source_local_design_id`。

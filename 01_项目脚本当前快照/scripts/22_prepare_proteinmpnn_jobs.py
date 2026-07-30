@@ -9,6 +9,7 @@ from typing import Any, Iterable, Mapping
 
 from common import (
     ROUTE_PROVENANCE_FIELDS,
+    SOURCE_ROUTE_PROVENANCE_FIELDS,
     assert_active_route_path,
     append_run_header,
     load_route_manifest,
@@ -19,6 +20,7 @@ from common import (
     setup_logger,
     validate_route_project_config,
     validate_row_route_provenance,
+    validate_source_route_provenance,
     write_csv,
     write_markdown,
     write_route_manifest,
@@ -31,14 +33,18 @@ JOB_FIELDS = [
     "protocol_identity_sha256",
     "stage3_mode",
     "preferred_route",
+    "global_backbone_id",
+    "source_local_design_id",
+    "source_batch_label",
+    "backbone_family_id",
     "design_id",
     "backbone_id",
     "site_label",
     "site_id",
     "source_backbone_pdb",
     "source_backbone_pdb_sha256",
-    "stage2_pass_csv",
-    "stage2_pass_csv_sha256",
+    "stage2_selection_csv",
+    "stage2_selection_csv_sha256",
     "input_tag",
     "input_tags",
     "input_pdb",
@@ -60,7 +66,7 @@ JOB_FIELDS = [
     "log_file",
     "status",
     "notes",
-] + ROUTE_PROVENANCE_FIELDS
+] + ROUTE_PROVENANCE_FIELDS + SOURCE_ROUTE_PROVENANCE_FIELDS
 
 
 def _split_csv(value: str) -> list[str]:
@@ -129,19 +135,77 @@ def _canonical_sha256(value: Mapping[str, Any]) -> str:
     return hashlib.sha256(payload.encode("utf-8")).hexdigest()
 
 
-def _strict_design_lookup(rows: Iterable[Mapping[str, str]]) -> dict[str, dict[str, str]]:
+def _strict_global_backbone_lookup(rows: Iterable[Mapping[str, str]]) -> dict[str, dict[str, str]]:
     lookup: dict[str, dict[str, str]] = {}
     for row in rows:
         item = dict(row)
-        design_id = str(item.get("design_id", "")).strip()
-        if not design_id:
-            raise RuntimeError("Stage 2 pass row is missing design_id")
-        if "," in design_id:
-            raise RuntimeError(f"Stage 2 pass row has aggregate design_id: {design_id}")
-        if design_id in lookup:
-            raise RuntimeError(f"Duplicate Stage 2 design_id: {design_id}")
-        lookup[design_id] = item
+        global_backbone_id = str(item.get("global_backbone_id", "")).strip()
+        if not global_backbone_id:
+            raise RuntimeError("Stage 2.5 selection row is missing global_backbone_id")
+        if "," in global_backbone_id:
+            raise RuntimeError(f"Stage 2.5 selection row has aggregate global_backbone_id: {global_backbone_id}")
+        if global_backbone_id in lookup:
+            raise RuntimeError(f"Duplicate Stage 2.5 global_backbone_id: {global_backbone_id}")
+        lookup[global_backbone_id] = item
     return lookup
+
+
+def _aggregate_source_manifest_lookup(
+    route_manifest: Mapping[str, Any],
+) -> dict[Path, dict[str, str]]:
+    records = route_manifest.get("source_route_manifests")
+    if not isinstance(records, list) or not records:
+        raise RuntimeError("Stage 22 requires a Stage 2.5 aggregate route manifest with source_route_manifests")
+    expected_count = int(route_manifest.get("stage2_5_source_count", len(records)))
+    if len(records) != expected_count:
+        raise RuntimeError(
+            f"Stage 22 aggregate source manifest count mismatch: records={len(records)}, expected={expected_count}"
+        )
+
+    lookup: dict[Path, dict[str, str]] = {}
+    for index, record in enumerate(records, start=1):
+        if not isinstance(record, Mapping):
+            raise RuntimeError(f"Stage 22 aggregate source manifest record {index} is invalid")
+        required = ["run_id", "batch_id", "manifest_path", "manifest_sha256"]
+        missing = [field for field in required if not str(record.get(field, "")).strip()]
+        if missing:
+            raise RuntimeError(f"Stage 22 aggregate source manifest record {index} is missing {missing}")
+        manifest_path = assert_active_route_path(
+            _resolve_mixed_path(str(record["manifest_path"])),
+            f"Stage 22 aggregate source route manifest {index}",
+        ).resolve()
+        if manifest_path in lookup:
+            raise RuntimeError(f"Stage 22 aggregate route lists a source manifest more than once: {manifest_path}")
+        actual_sha256 = _sha256_file(manifest_path)
+        expected_sha256 = str(record["manifest_sha256"]).strip()
+        if actual_sha256 != expected_sha256:
+            raise RuntimeError(
+                f"Stage 22 aggregate source route manifest SHA-256 mismatch: {manifest_path}"
+            )
+        lookup[manifest_path] = {
+            "source_run_id": str(record["run_id"]).strip(),
+            "source_batch_id": str(record["batch_id"]).strip(),
+            "source_route_manifest_sha256": expected_sha256,
+        }
+    return lookup
+
+
+def _validate_aggregate_source_membership(
+    row: Mapping[str, Any],
+    source_manifest_path: Path,
+    aggregate_sources: Mapping[Path, Mapping[str, str]],
+    label: str,
+) -> None:
+    expected = aggregate_sources.get(source_manifest_path.resolve())
+    if expected is None:
+        raise RuntimeError(f"{label} source route manifest is not listed by the Stage 2.5 aggregate route")
+    for field in ["source_run_id", "source_batch_id", "source_route_manifest_sha256"]:
+        observed = str(row.get(field, "")).strip()
+        if observed != str(expected[field]):
+            raise RuntimeError(
+                f"{label} aggregate source provenance mismatch for {field}: "
+                f"observed={observed!r}, expected={expected[field]!r}"
+            )
 
 
 def _chain_id_from_pdb_line(line: str, source_pdb: Path) -> str:
@@ -342,7 +406,9 @@ def _summary_markdown(job_rows: list[Mapping[str, Any]], run_script: Path) -> st
     columns = [
         "stage3_job_id",
         "stage3_mode",
-        "design_id",
+        "global_backbone_id",
+        "source_batch_label",
+        "backbone_family_id",
         "seqs_per_backbone",
         "relax_cycles",
         "proteinmpnn_temperature",
@@ -365,6 +431,9 @@ Important:
 
 - The input complex keeps the RFpeptides peptide chain first and the FGA target
   crop second, matching `dl_interface_design.py` expectations.
+- Every prepared structure is selected from the Stage 2.5 diversity table and
+  is identified by `global_backbone_id`; batch-local `design_id` is provenance
+  only and is never used as a downstream primary key.
 - FGA target chain remains visible/fixed; ProteinMPNN designs the peptide chain.
 - If `relax_cycles > 0`, `dl_interface_design.py` disallows
   `seqs_per_struct > 1`, so this preparation script duplicates the selected
@@ -381,11 +450,15 @@ Important:
 
 def main() -> int:
     parser = argparse.ArgumentParser(description="Prepare Stage 3 ProteinMPNN jobs for RFpeptides backbones.")
-    parser.add_argument("--stage2-root", required=True)
+    parser.add_argument("--stage2-5-root", required=True)
     parser.add_argument("--project-config", required=True)
-    parser.add_argument("--output-root", default="", help="Defaults to --stage2-root.")
-    parser.add_argument("--stage2-pass-csv", default="")
-    parser.add_argument("--selected-backbones", required=True)
+    parser.add_argument("--output-root", required=True)
+    parser.add_argument("--stage2-selection-csv", required=True)
+    parser.add_argument(
+        "--selected-global-backbones",
+        default="",
+        help="Optional comma-separated global_backbone_id subset. Defaults to all selected rows in the CSV.",
+    )
     parser.add_argument("--dl-binder-design-root", required=True)
     parser.add_argument("--seqs-per-backbone", type=int, default=8)
     parser.add_argument("--relax-cycles", type=int, default=0)
@@ -409,22 +482,31 @@ def main() -> int:
     if not args.omit_aas:
         raise RuntimeError("--omit-aas must not be empty")
 
-    stage2_root = _resolve_mixed_path(args.stage2_root)
-    output_root = _resolve_mixed_path(args.output_root) if args.output_root else stage2_root
-    stage2_pass_csv = (
-        _resolve_mixed_path(args.stage2_pass_csv)
-        if args.stage2_pass_csv
-        else stage2_root / "03_backbone_qc" / "FGA_rfpeptides_backbones_qc_pass.csv"
-    )
+    stage2_5_root = _resolve_mixed_path(args.stage2_5_root)
+    output_root = _resolve_mixed_path(args.output_root)
+    stage2_selection_csv = _resolve_mixed_path(args.stage2_selection_csv)
     dl_binder_design_root = _resolve_mixed_path(args.dl_binder_design_root)
-    assert_active_route_path(stage2_root, "Stage 22 Stage 2 root")
-    assert_active_route_path(output_root, "Stage 22 output root", must_exist=False)
-    assert_active_route_path(stage2_pass_csv, "Stage 22 Stage 2 pass CSV")
-    assert_active_route_path(dl_binder_design_root, "Stage 22 dl_binder_design root")
-    route_manifest_path, route_manifest, route_manifest_sha256 = load_route_manifest(stage2_root)
+    stage2_5_root = assert_active_route_path(stage2_5_root, "Stage 22 Stage 2.5 root")
+    output_root = assert_active_route_path(output_root, "Stage 22 output root", must_exist=False)
+    stage2_selection_csv = assert_active_route_path(
+        stage2_selection_csv,
+        "Stage 22 Stage 2.5 selection CSV",
+    )
+    dl_binder_design_root = assert_active_route_path(
+        dl_binder_design_root,
+        "Stage 22 dl_binder_design root",
+    )
+    try:
+        stage2_selection_csv.resolve().relative_to(stage2_5_root.resolve())
+    except ValueError as exc:
+        raise RuntimeError(
+            f"Stage 22 selection CSV must be inside its Stage 2.5 root: {stage2_selection_csv}"
+        ) from exc
+    route_manifest_path, route_manifest, route_manifest_sha256 = load_route_manifest(stage2_5_root)
     validate_route_project_config(args.project_config, route_manifest)
     source_route_provenance = route_provenance_fields(route_manifest_path, route_manifest, route_manifest_sha256)
-    if output_root.resolve() != stage2_root.resolve():
+    aggregate_source_manifests = _aggregate_source_manifest_lookup(route_manifest)
+    if output_root.resolve() != stage2_5_root.resolve():
         route_manifest_path, route_manifest, route_manifest_sha256 = write_route_manifest(output_root, route_manifest)
     route_provenance = route_provenance_fields(route_manifest_path, route_manifest, route_manifest_sha256)
     dl_interface_design_script = dl_binder_design_root / "mpnn_fr" / "dl_interface_design.py"
@@ -434,47 +516,123 @@ def main() -> int:
     if not default_checkpoint.exists():
         raise RuntimeError(f"Missing ProteinMPNN checkpoint: {default_checkpoint}")
 
-    pass_rows = _read_required_csv(stage2_pass_csv)
-    pass_lookup = _strict_design_lookup(pass_rows)
-    selected = _split_csv(args.selected_backbones)
+    selection_rows = _read_required_csv(stage2_selection_csv)
+    selection_lookup = _strict_global_backbone_lookup(selection_rows)
+    selection_order = [
+        str(row["global_backbone_id"]).strip()
+        for row in sorted(
+            selection_rows,
+            key=lambda row: int(str(row.get("stage2_5_selection_rank", "0")).strip() or "0"),
+        )
+    ]
+    requested = _split_csv(args.selected_global_backbones)
+    if requested:
+        if len(requested) != len(set(requested)):
+            raise RuntimeError("--selected-global-backbones contains duplicate global backbone IDs")
+        missing_requested = sorted(set(requested) - set(selection_lookup))
+        if missing_requested:
+            raise RuntimeError(
+                f"Requested global backbone IDs are absent from the Stage 2.5 selection CSV: "
+                f"{missing_requested[:10]}"
+            )
+        requested_set = set(requested)
+        selected = [global_id for global_id in selection_order if global_id in requested_set]
+    else:
+        selected = selection_order
     if not selected:
-        raise RuntimeError("--selected-backbones must not be empty")
-    if len(selected) != len(set(selected)):
-        raise RuntimeError("--selected-backbones contains duplicate backbone IDs")
+        raise RuntimeError("No Stage 2.5 global backbones were selected")
 
     selected_rows: list[dict[str, Any]] = []
     source_pdb_hashes: dict[str, str] = {}
-    for backbone_id in selected:
-        row = pass_lookup.get(backbone_id)
+    selected_family_ids: set[str] = set()
+    for global_backbone_id in selected:
+        row = selection_lookup.get(global_backbone_id)
         if row is None:
-            raise RuntimeError(f"Selected backbone not found in Stage 2 pass CSV: {backbone_id}")
+            raise RuntimeError(
+                f"Selected global backbone not found in Stage 2.5 selection CSV: {global_backbone_id}"
+            )
         if str(row.get("pass_backbone_qc", "")).strip().lower() != "true":
-            raise RuntimeError(f"Selected backbone is not marked pass_backbone_qc=true: {backbone_id}")
-        validate_row_route_provenance(row, source_route_provenance, f"Stage 22 Stage 2 row {backbone_id}")
+            raise RuntimeError(
+                f"Selected global backbone is not marked pass_backbone_qc=true: {global_backbone_id}"
+            )
+        if str(row.get("stage2_5_selected", "")).strip().lower() != "true":
+            raise RuntimeError(
+                f"Selected global backbone is not marked stage2_5_selected=true: {global_backbone_id}"
+            )
+        family_id = str(row.get("backbone_family_id", "")).strip()
+        if not family_id:
+            raise RuntimeError(f"Selected global backbone has no backbone_family_id: {global_backbone_id}")
+        if family_id in selected_family_ids:
+            raise RuntimeError(f"Stage 2.5 selection contains more than one representative from family {family_id}")
+        selected_family_ids.add(family_id)
+        if str(row.get("family_representative_global_backbone_id", "")).strip() != global_backbone_id:
+            raise RuntimeError(
+                f"Stage 2.5 selected row is not its family representative: {global_backbone_id}"
+            )
+        validate_row_route_provenance(
+            row,
+            source_route_provenance,
+            f"Stage 22 Stage 2.5 row {global_backbone_id}",
+        )
+        validate_source_route_provenance(row, f"Stage 22 Stage 2.5 row {global_backbone_id}")
+        source_stage2_root = assert_active_route_path(
+            _resolve_mixed_path(str(row.get("source_stage2_root", ""))),
+            f"Stage 22 source Stage 2 root for {global_backbone_id}",
+        )
+        source_manifest_path = assert_active_route_path(
+            _resolve_mixed_path(str(row.get("source_route_manifest", ""))),
+            f"Stage 22 source route manifest for {global_backbone_id}",
+        )
+        if source_manifest_path.parent.resolve() != source_stage2_root.resolve():
+            raise RuntimeError(
+                f"Stage 22 source Stage 2 root does not contain its route manifest: {global_backbone_id}"
+            )
+        _validate_aggregate_source_membership(
+            row,
+            source_manifest_path,
+            aggregate_source_manifests,
+            f"Stage 22 Stage 2.5 row {global_backbone_id}",
+        )
         source_pdb = _resolve_mixed_path(str(row.get("rf_pdb", "")))
-        assert_active_route_path(source_pdb, f"Stage 22 source backbone PDB for {backbone_id}")
+        source_pdb = assert_active_route_path(
+            source_pdb,
+            f"Stage 22 source backbone PDB for {global_backbone_id}",
+        )
+        try:
+            source_pdb.resolve().relative_to(source_stage2_root.resolve())
+        except ValueError as exc:
+            raise RuntimeError(
+                f"Stage 22 source backbone PDB is outside its source Stage 2 root: {global_backbone_id}"
+            ) from exc
         if not source_pdb.exists():
-            raise RuntimeError(f"Missing source backbone PDB for {backbone_id}: {source_pdb}")
+            raise RuntimeError(f"Missing source backbone PDB for {global_backbone_id}: {source_pdb}")
+        source_pdb_sha256 = _sha256_file(source_pdb)
+        if source_pdb_sha256 != str(row.get("pdb_sha256", "")).strip():
+            raise RuntimeError(
+                f"Stage 22 source backbone PDB SHA-256 mismatch for {global_backbone_id}"
+            )
         peptide_chain = str(row.get("peptide_chain", "")).strip()
         target_chain = str(row.get("target_chain", "")).strip()
         if not peptide_chain or not target_chain:
-            raise RuntimeError(f"Missing peptide/target chain metadata for {backbone_id}")
+            raise RuntimeError(f"Missing peptide/target chain metadata for {global_backbone_id}")
         if peptide_chain == target_chain:
-            raise RuntimeError(f"Peptide and target chains are identical for {backbone_id}: {peptide_chain}")
+            raise RuntimeError(
+                f"Peptide and target chains are identical for {global_backbone_id}: {peptide_chain}"
+            )
         item = dict(row)
         item["_resolved_source_pdb"] = source_pdb
         item["_peptide_chain"] = peptide_chain
         item["_target_chain"] = target_chain
         selected_rows.append(item)
-        source_pdb_hashes[backbone_id] = _sha256_file(source_pdb)
+        source_pdb_hashes[global_backbone_id] = source_pdb_sha256
 
     stage3_mode = "proteinmpnn_only" if args.relax_cycles == 0 else "proteinmpnn_fastrelax"
-    stage2_pass_csv_sha256 = _sha256_file(stage2_pass_csv)
+    stage2_selection_csv_sha256 = _sha256_file(stage2_selection_csv)
     protocol_identity = {
-        "selected_backbones": sorted(selected),
+        "selected_global_backbones": sorted(selected),
         "source_backbone_pdb_sha256": {key: source_pdb_hashes[key] for key in sorted(source_pdb_hashes)},
-        "stage2_pass_csv_sha256": stage2_pass_csv_sha256,
-        "source_route_manifest_sha256": route_manifest_sha256,
+        "stage2_selection_csv_sha256": stage2_selection_csv_sha256,
+        "stage2_5_route_manifest_sha256": route_manifest_sha256,
         "route_protocol_version": route_manifest["route_protocol_version"],
         "hotspot_mapping_version": route_manifest["hotspot_mapping_version"],
         "stage3_mode": stage3_mode,
@@ -513,7 +671,7 @@ def main() -> int:
     job_rows: list[dict[str, Any]] = []
     prepared_inputs: dict[str, list[tuple[str, Path, str]]] = {}
     for row in selected_rows:
-        backbone_id = str(row["design_id"])
+        backbone_id = str(row["global_backbone_id"])
         source_pdb = Path(row["_resolved_source_pdb"])
         peptide_chain = str(row["_peptide_chain"])
         target_chain = str(row["_target_chain"])
@@ -541,7 +699,7 @@ def main() -> int:
     command_multiline = "\n".join(command_lines)
 
     for row in selected_rows:
-        backbone_id = str(row["design_id"])
+        backbone_id = str(row["global_backbone_id"])
         input_items = prepared_inputs[backbone_id]
         tags = [item[0] for item in input_items]
         input_pdbs = [item[1] for item in input_items]
@@ -549,43 +707,48 @@ def main() -> int:
         job_id = _safe_token(f"{backbone_id}_{stage3_mode}_{protocol_identity_sha256[:12]}")
         job_rows.append(
             {
-            "stage3_job_id": job_id,
-            "run_group_id": run_group_id,
-            "protocol_identity_sha256": protocol_identity_sha256,
-            "stage3_mode": stage3_mode,
-            "preferred_route": "true" if stage3_mode == "proteinmpnn_only" else "false",
-            "design_id": backbone_id,
-            "backbone_id": backbone_id,
-            "site_label": row.get("site_label", ""),
-            "site_id": row.get("site_id", ""),
-            "source_backbone_pdb": row["_resolved_source_pdb"],
-            "source_backbone_pdb_sha256": source_pdb_hashes[backbone_id],
-            "stage2_pass_csv": stage2_pass_csv,
-            "stage2_pass_csv_sha256": stage2_pass_csv_sha256,
-            "input_tag": tags[0],
-            "input_tags": ",".join(tags),
-            "input_pdb": input_pdbs[0],
-            "input_pdb_sha256": _sha256_file(input_pdbs[0]),
-            "input_pdbs": ",".join(str(path) for path in input_pdbs),
-            "input_pdb_sha256s": ",".join(_sha256_file(path) for path in input_pdbs),
-            "input_pdb_dir": input_dir,
-            "runlist": runlist,
-            "output_pdb_dir": output_pdb_dir,
-            "dl_binder_design_root": dl_binder_design_root,
-            "dl_interface_design_script": dl_interface_design_script,
-            "conda_env": args.conda_env,
-            "seqs_per_backbone": args.seqs_per_backbone,
-            "relax_cycles": args.relax_cycles,
-            "proteinmpnn_temperature": args.temperature,
-            "omit_aas": args.omit_aas,
-            "command": _command_one_line(command_lines),
-            "run_script": run_script,
-            "log_file": log_file,
-            "status": "pending_manual_execution",
-            "notes": f"Stage 3 {stage3_mode} command only; sequence design not run by this script. "
-            + "Input copy notes: "
-            + ";".join(copy_notes),
-            **route_provenance,
+                "stage3_job_id": job_id,
+                "run_group_id": run_group_id,
+                "protocol_identity_sha256": protocol_identity_sha256,
+                "stage3_mode": stage3_mode,
+                "preferred_route": "true" if stage3_mode == "proteinmpnn_only" else "false",
+                "global_backbone_id": backbone_id,
+                "source_local_design_id": row.get("source_local_design_id", ""),
+                "source_batch_label": row.get("source_batch_label", ""),
+                "backbone_family_id": row.get("backbone_family_id", ""),
+                "design_id": backbone_id,
+                "backbone_id": backbone_id,
+                "site_label": row.get("site_label", ""),
+                "site_id": row.get("site_id", ""),
+                "source_backbone_pdb": row["_resolved_source_pdb"],
+                "source_backbone_pdb_sha256": source_pdb_hashes[backbone_id],
+                "stage2_selection_csv": stage2_selection_csv,
+                "stage2_selection_csv_sha256": stage2_selection_csv_sha256,
+                "input_tag": tags[0],
+                "input_tags": ",".join(tags),
+                "input_pdb": input_pdbs[0],
+                "input_pdb_sha256": _sha256_file(input_pdbs[0]),
+                "input_pdbs": ",".join(str(path) for path in input_pdbs),
+                "input_pdb_sha256s": ",".join(_sha256_file(path) for path in input_pdbs),
+                "input_pdb_dir": input_dir,
+                "runlist": runlist,
+                "output_pdb_dir": output_pdb_dir,
+                "dl_binder_design_root": dl_binder_design_root,
+                "dl_interface_design_script": dl_interface_design_script,
+                "conda_env": args.conda_env,
+                "seqs_per_backbone": args.seqs_per_backbone,
+                "relax_cycles": args.relax_cycles,
+                "proteinmpnn_temperature": args.temperature,
+                "omit_aas": args.omit_aas,
+                "command": _command_one_line(command_lines),
+                "run_script": run_script,
+                "log_file": log_file,
+                "status": "pending_manual_execution",
+                "notes": f"Stage 3 {stage3_mode} command only; sequence design not run by this script. "
+                + "Input copy notes: "
+                + ";".join(copy_notes),
+                **route_provenance,
+                **{field: row.get(field, "") for field in SOURCE_ROUTE_PROVENANCE_FIELDS},
             }
         )
 

@@ -52,7 +52,9 @@ class RequiredCliInputTests(unittest.TestCase):
     REQUIRED_OPTIONS = {
         "20_make_rfpeptides_article_jobs.py": ["--input-root", "--output-root", "--selected-sites", "--rfpeptides-root", "--batch-id", "--project-config"],
         "21_collect_rfpeptides_backbones.py": ["--stage0-root", "--stage1-root", "--selected-sites", "--project-config"],
-        "22_prepare_proteinmpnn_jobs.py": ["--stage2-root", "--selected-backbones", "--dl-binder-design-root", "--project-config"],
+        "21b_build_stage2_global_backbone_manifest.py": ["--stage2-roots", "--output-root", "--project-config"],
+        "21c_cluster_stage2_backbone_families.py": ["--stage2-5-root", "--manifest-pass-csv", "--stage0-target-pdb", "--output-root", "--project-config"],
+        "22_prepare_proteinmpnn_jobs.py": ["--stage2-5-root", "--stage2-selection-csv", "--output-root", "--dl-binder-design-root", "--project-config"],
         "23_collect_proteinmpnn_sequences.py": ["--stage0-root", "--stage3-root", "--selected-backbones", "--stage3-jobs-csv", "--project-config"],
         "24_stage3d1_sidechain_repack.py": ["--stage0-root", "--stage3-root", "--selected-backbones", "--project-config"],
         "25_stage4_rosetta_interface_scoring.py": ["--stage0-root", "--stage3-root", "--selected-backbones", "--project-config"],

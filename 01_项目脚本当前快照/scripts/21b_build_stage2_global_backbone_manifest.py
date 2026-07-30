@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import argparse
+import copy
 import hashlib
 import os
 import re
@@ -8,7 +9,24 @@ from collections import defaultdict
 from pathlib import Path
 from typing import Any, Iterable, Mapping
 
-from common import append_run_header, read_csv, resolve_path, rows_to_markdown, setup_logger, write_csv, write_markdown
+from common import (
+    ROUTE_PROVENANCE_FIELDS,
+    SOURCE_ROUTE_PROVENANCE_FIELDS,
+    assert_active_route_path,
+    append_run_header,
+    canonical_json_sha256,
+    load_route_manifest,
+    read_csv,
+    resolve_path,
+    route_provenance_fields,
+    rows_to_markdown,
+    setup_logger,
+    validate_route_project_config,
+    validate_row_route_provenance,
+    write_csv,
+    write_markdown,
+    write_route_manifest,
+)
 
 
 IDENTITY_FIELDS = [
@@ -19,6 +37,7 @@ IDENTITY_FIELDS = [
     "source_local_design_id",
     "source_route_run_id",
     "source_route_batch_id",
+    *SOURCE_ROUTE_PROVENANCE_FIELDS,
     "pdb_sha256",
     "atom_coordinate_sha256",
     "local_design_id_occurrences",
@@ -27,6 +46,24 @@ IDENTITY_FIELDS = [
     "exact_pdb_duplicate_global_ids",
     "coordinate_duplicate_count",
     "coordinate_duplicate_global_ids",
+]
+
+MANIFEST_COMPATIBILITY_FIELDS = [
+    "route_name",
+    "route_protocol_version",
+    "hotspot_mapping_version",
+    "production_route",
+    "cyclization",
+    "site_labels",
+    "protocol_peptide_length_min",
+    "protocol_peptide_length_max",
+    "run_peptide_length_min",
+    "run_peptide_length_max",
+    "project_config_sha256",
+    "effective_project_config_sha256",
+    "stage0_sites",
+    "stage1_protocol",
+    "rfpeptides_runtime",
 ]
 
 DUPLICATE_AUDIT_FIELDS = [
@@ -103,6 +140,98 @@ def _single_value(rows: Iterable[Mapping[str, str]], field: str, label: str) -> 
     if len(values) != 1:
         raise RuntimeError(f"Expected exactly one non-empty {field} in {label}; found {sorted(values)}")
     return next(iter(values))
+
+
+def _manifest_compatibility_identity(manifest: Mapping[str, Any]) -> dict[str, Any]:
+    return {field: copy.deepcopy(manifest.get(field)) for field in MANIFEST_COMPATIBILITY_FIELDS}
+
+
+def _validate_compatible_manifest(
+    manifest: Mapping[str, Any],
+    expected_identity: Mapping[str, Any],
+    label: str,
+) -> None:
+    observed = _manifest_compatibility_identity(manifest)
+    for field in MANIFEST_COMPATIBILITY_FIELDS:
+        if observed[field] != expected_identity[field]:
+            raise RuntimeError(
+                f"{label} is incompatible with the first Stage 2 route manifest for {field}: "
+                f"observed={observed[field]!r}, expected={expected_identity[field]!r}"
+            )
+
+
+def _validate_all_row_provenance(
+    rows: list[dict[str, str]],
+    expected: Mapping[str, str],
+    label: str,
+) -> None:
+    # The common validator confirms the referenced manifest bytes; the loop then
+    # checks every row without repeatedly hashing the same small JSON file.
+    validate_row_route_provenance(rows[0], expected, f"{label} row 1")
+    expected_manifest = assert_active_route_path(expected["route_manifest_path"], f"{label} route manifest")
+    for index, row in enumerate(rows, start=1):
+        row_label = f"{label} row {index}"
+        for field in ROUTE_PROVENANCE_FIELDS:
+            observed = str(row.get(field, "")).strip()
+            if field == "route_manifest_path":
+                observed_path = assert_active_route_path(observed, f"{row_label} route manifest")
+                if observed_path.resolve() != expected_manifest.resolve():
+                    raise RuntimeError(
+                        f"{row_label} route manifest path mismatch: "
+                        f"observed={observed_path}, expected={expected_manifest}"
+                    )
+            elif observed != str(expected[field]):
+                raise RuntimeError(
+                    f"{row_label} route provenance mismatch for {field}: "
+                    f"observed={observed!r}, expected={expected[field]!r}"
+                )
+
+
+def _aggregate_manifest_payload(
+    source_manifests: list[dict[str, Any]],
+    merged_count: int,
+) -> dict[str, Any]:
+    first = source_manifests[0]["manifest"]
+    payload = copy.deepcopy(
+        {
+            key: value
+            for key, value in first.items()
+            if key not in {"batch_id", "created_at", "num_designs_requested", "run_id"}
+        }
+    )
+    source_records = sorted(
+        [
+            {
+                "run_id": str(item["manifest"]["run_id"]),
+                "batch_id": str(item["manifest"]["batch_id"]),
+                "manifest_path": str(item["path"]),
+                "manifest_sha256": str(item["sha256"]),
+            }
+            for item in source_manifests
+        ],
+        key=lambda record: (record["batch_id"], record["run_id"]),
+    )
+    source_identity_sha256 = canonical_json_sha256(
+        [
+            {
+                "run_id": record["run_id"],
+                "batch_id": record["batch_id"],
+                "manifest_sha256": record["manifest_sha256"],
+            }
+            for record in source_records
+        ]
+    )
+    payload.update(
+        {
+            "batch_id": f"stage2_5_merge_{len(source_records)}b_{source_identity_sha256[:12]}",
+            "num_designs_requested": merged_count,
+            "source_route_manifests": source_records,
+            "stage2_5_operation": "global_identity_merge_and_backbone_family_selection",
+            "stage2_5_source_count": len(source_records),
+            "stage2_5_source_identity_sha256": source_identity_sha256,
+        }
+    )
+    return payload
 
 
 def _batch_label(route_batch_id: str, index: int) -> str:
@@ -223,13 +352,18 @@ def main() -> int:
         description="Merge Stage 2 backbone QC tables and assign globally unique backbone identities."
     )
     parser.add_argument("--stage2-roots", nargs="+", required=True)
+    parser.add_argument("--project-config", required=True)
     parser.add_argument("--output-root", required=True)
     args = parser.parse_args()
 
     logger = setup_logger("21b_build_stage2_global_backbone_manifest")
     append_run_header(logger, "21b_build_stage2_global_backbone_manifest.py")
 
-    output_root = _resolve_mixed_path(args.output_root)
+    output_root = assert_active_route_path(
+        _resolve_mixed_path(args.output_root),
+        "Stage 21b aggregate output root",
+        must_exist=False,
+    )
     output_dir = output_root / "03_backbone_qc_merged"
     merged_rows: list[dict[str, Any]] = []
     original_fields: list[str] = []
@@ -237,16 +371,50 @@ def main() -> int:
     seen_route_run_ids: set[str] = set()
     seen_route_batch_ids: set[str] = set()
     source_counts: dict[str, int] = {}
+    source_manifests: list[dict[str, Any]] = []
+    expected_manifest_identity: dict[str, Any] | None = None
 
     for root_index, root_value in enumerate(args.stage2_roots, start=1):
-        stage2_root = _resolve_mixed_path(root_value).resolve()
+        stage2_root = assert_active_route_path(
+            _resolve_mixed_path(root_value),
+            f"Stage 21b source Stage 2 root {root_index}",
+        )
         if stage2_root in seen_roots:
             raise RuntimeError(f"Stage 2 root was supplied more than once: {stage2_root}")
         seen_roots.add(stage2_root)
-        qc_csv = stage2_root / "03_backbone_qc" / "FGA_rfpeptides_backbones_qc.csv"
+        manifest_path, route_manifest, route_manifest_sha256 = load_route_manifest(stage2_root)
+        validate_route_project_config(args.project_config, route_manifest)
+        source_route_provenance = route_provenance_fields(
+            manifest_path,
+            route_manifest,
+            route_manifest_sha256,
+        )
+        if expected_manifest_identity is None:
+            expected_manifest_identity = _manifest_compatibility_identity(route_manifest)
+        else:
+            _validate_compatible_manifest(
+                route_manifest,
+                expected_manifest_identity,
+                f"Stage 21b source manifest {manifest_path}",
+            )
+
+        qc_csv = assert_active_route_path(
+            stage2_root / "03_backbone_qc" / "FGA_rfpeptides_backbones_qc.csv",
+            f"Stage 21b source Stage 2 QC table {root_index}",
+        )
         rows = read_csv(qc_csv)
         if not rows:
             raise RuntimeError(f"Missing or empty Stage 2 QC table: {qc_csv}")
+        _validate_all_row_provenance(
+            rows,
+            source_route_provenance,
+            f"Stage 21b {qc_csv}",
+        )
+        if len(rows) != int(route_manifest["num_designs_requested"]):
+            raise RuntimeError(
+                f"Stage 2 row count does not match route manifest for {qc_csv}: "
+                f"rows={len(rows)}, requested={route_manifest['num_designs_requested']}"
+            )
         if not original_fields:
             original_fields = list(rows[0].keys())
         elif list(rows[0].keys()) != original_fields:
@@ -254,6 +422,8 @@ def main() -> int:
 
         route_run_id = _single_value(rows, "route_run_id", str(qc_csv))
         route_batch_id = _single_value(rows, "route_batch_id", str(qc_csv))
+        if route_run_id != str(route_manifest["run_id"]) or route_batch_id != str(route_manifest["batch_id"]):
+            raise RuntimeError(f"Stage 2 row route identity does not match manifest: {qc_csv}")
         if route_run_id in seen_route_run_ids:
             raise RuntimeError(f"Duplicate route_run_id across Stage 2 roots: {route_run_id}")
         if route_batch_id in seen_route_batch_ids:
@@ -261,6 +431,13 @@ def main() -> int:
         seen_route_run_ids.add(route_run_id)
         seen_route_batch_ids.add(route_batch_id)
         batch_label = _batch_label(route_batch_id, root_index)
+        source_manifests.append(
+            {
+                "path": manifest_path,
+                "manifest": route_manifest,
+                "sha256": route_manifest_sha256,
+            }
+        )
 
         local_ids = [str(row.get("design_id", "")).strip() for row in rows]
         if not all(local_ids):
@@ -271,11 +448,15 @@ def main() -> int:
         source_counts[batch_label] = len(rows)
         for row in rows:
             local_id = str(row["design_id"]).strip()
-            pdb_path = _resolve_mixed_path(str(row.get("rf_pdb", "")))
+            pdb_path = assert_active_route_path(
+                _resolve_mixed_path(str(row.get("rf_pdb", ""))),
+                f"Stage 21b source backbone PDB for {batch_label}/{local_id}",
+            )
             if not pdb_path.is_file():
                 raise RuntimeError(f"Missing backbone PDB for {batch_label}/{local_id}: {pdb_path}")
             merged_rows.append(
                 {
+                    **dict(row),
                     "global_backbone_id": f"{route_run_id}__{local_id}",
                     "global_backbone_label": f"{batch_label}__{local_id}",
                     "source_batch_label": batch_label,
@@ -283,11 +464,44 @@ def main() -> int:
                     "source_local_design_id": local_id,
                     "source_route_run_id": route_run_id,
                     "source_route_batch_id": route_batch_id,
+                    "source_run_id": route_run_id,
+                    "source_batch_id": route_batch_id,
+                    "source_route_manifest": manifest_path,
+                    "source_route_manifest_sha256": route_manifest_sha256,
                     "pdb_sha256": _sha256_file(pdb_path),
                     "atom_coordinate_sha256": _atom_coordinate_sha256(pdb_path),
-                    **dict(row),
                 }
             )
+
+    aggregate_payload = _aggregate_manifest_payload(source_manifests, len(merged_rows))
+    existing_manifest_path = output_root / "route_manifest.json"
+    if existing_manifest_path.exists():
+        _, existing_manifest, _ = load_route_manifest(output_root)
+        stable_identity_fields = [
+            "batch_id",
+            "num_designs_requested",
+            "stage2_5_operation",
+            "stage2_5_source_count",
+            "stage2_5_source_identity_sha256",
+        ]
+        for field in stable_identity_fields:
+            if existing_manifest.get(field) != aggregate_payload.get(field):
+                raise RuntimeError(
+                    f"Stage 21b output root already contains a different aggregate route manifest for {field}"
+                )
+        aggregate_payload["source_route_manifests"] = existing_manifest["source_route_manifests"]
+        aggregate_payload["created_at"] = existing_manifest["created_at"]
+    aggregate_manifest_path, aggregate_manifest, aggregate_manifest_sha256 = write_route_manifest(
+        output_root,
+        aggregate_payload,
+    )
+    aggregate_route_provenance = route_provenance_fields(
+        aggregate_manifest_path,
+        aggregate_manifest,
+        aggregate_manifest_sha256,
+    )
+    for row in merged_rows:
+        row.update(aggregate_route_provenance)
 
     global_ids = [str(row["global_backbone_id"]) for row in merged_rows]
     if len(set(global_ids)) != len(global_ids):

@@ -2478,48 +2478,110 @@ Do not:
 - Use Cys-Cys / SG-SG geometry checks for this branch.
 - Report any peptide as final before all gates pass.
 
-## 19. Current Recovery Step (updated 2026-07-16)
+## 19. Current Recovery Step (updated 2026-07-30)
 
-Current state:
+Current active-route state:
 
 ```text
 Stage -1 site discovery: retained
-Stage 0 target crop and mapping: retained
+Stage 0 target crop and mapping: retained and hash-locked
 pre-hotspot-fix Stage 1-5 outputs: quarantined
-false-preflight Stage 1 N20 smoke: quarantined, 0 usable
-runtime-locked Stage 1 N1-v2 smoke: completed
-strict Stage 2 provenance/contact QC: 1/1 engineering pass
-ProteinMPNN / Stage 4 / Stage 5 restart: blocked pending new small-batch review
+corrected Stage 1 production: 6 batches x 2,000 = 12,000 backbones
+strict Stage 2 provenance/contact/geometry QC: 1,937/12,000 pass
+Stage 2.5 backbone families: 1,658
+Stage 2.5 selected family representatives: 312
+Stage 3A ProteinMPNN-only jobs prepared: 312
+ProteinMPNN execution: not run by Stage 3A preparation
 ```
 
-The only currently verified smoke ID is:
+The six corrected Stage 1 roots are:
 
 ```text
-RFpep_Site_2_0000 (N1-v2 engineering smoke only)
+results/rfpeptides_head_to_tail_v1_20260718_N2000_L12_24_batch01
+results/rfpeptides_head_to_tail_v1_20260718_N2000_L12_24_batch02
+results/rfpeptides_head_to_tail_v1_20260718_N2000_L12_24_batch03
+results/rfpeptides_head_to_tail_v1_20260718_N2000_L12_24_batch04
+results/rfpeptides_head_to_tail_v1_20260718_N2000_L12_24_batch05
+results/rfpeptides_head_to_tail_v1_20260718_N2000_L12_24_batch06
 ```
 
-Review script:
+Stage 2.5 now has its own aggregate `route_manifest.json`. `21b` loads and
+validates every source route manifest, checks every Stage 2 row against its
+source provenance, and hard-fails if route protocol, hotspot mapping, active
+configuration, Stage 0 hashes, peptide-length protocol, Stage 1 protocol, or
+runtime identity differ across batches. Each row retains source provenance,
+while its active route provenance points to the aggregate manifest.
+
+Identity rule:
 
 ```text
-results/rfpeptides_article_route_clean_20260716_runtimefix_smoke_N1_v2/
-  03_backbone_qc_runtimefix_strict/
-  RFpep_Site_2_stage2_top_pass_review.pml
+global_backbone_id = source route_run_id + "__" + source local design_id
 ```
 
-Before any larger generation run:
+Batch-local `design_id` is source provenance only. Stage 2.5 selection and all
+Stage 3A task identities use `global_backbone_id`.
 
-1. Confirm the runner reports the single pinned home runtime path, commit and
-   source hashes.
-2. Inspect `runtime_audit.json` for every small-batch design.
-3. Confirm model-tensor hotspot indices equal
-   `peptide_length + crop_position - 1`; output PDB numbering may remain the
-   target's original `A1-A86` because the canonical home entrypoint supplies
-   `idx_pdb` to the writer.
-4. Confirm target sequence identity, peptide-only cyclic indices and output
-   chain order all pass Stage 2 provenance gates.
-5. Open strict-pass structures in PyMOL and record manual accept/reject before
-   any production scale.
+Strict Stage 2.5 commands:
 
-Do not restart ProteinMPNN, Rosetta scoring, or Stage 5 until this manual review
-is complete. The next scale must remain small enough to audit before any
-production-size RFpeptides run.
+```bash
+cd /mnt/c/SH/fga_cyclic_peptide_design
+source ~/fga_model_envs/miniforge3/etc/profile.d/conda.sh
+conda activate fga_stage1_fpocket
+
+python scripts/21b_build_stage2_global_backbone_manifest.py \
+  --stage2-roots \
+    results/rfpeptides_head_to_tail_v1_20260718_N2000_L12_24_batch01 \
+    results/rfpeptides_head_to_tail_v1_20260718_N2000_L12_24_batch02 \
+    results/rfpeptides_head_to_tail_v1_20260718_N2000_L12_24_batch03 \
+    results/rfpeptides_head_to_tail_v1_20260718_N2000_L12_24_batch04 \
+    results/rfpeptides_head_to_tail_v1_20260718_N2000_L12_24_batch05 \
+    results/rfpeptides_head_to_tail_v1_20260718_N2000_L12_24_batch06 \
+  --project-config config/rfpeptides_head_to_tail.yaml \
+  --output-root results/rfpeptides_head_to_tail_v1_20260718_stage2_5_batches01_06
+
+python scripts/21c_cluster_stage2_backbone_families.py \
+  --stage2-5-root results/rfpeptides_head_to_tail_v1_20260718_stage2_5_batches01_06 \
+  --project-config config/rfpeptides_head_to_tail.yaml \
+  --manifest-pass-csv results/rfpeptides_head_to_tail_v1_20260718_stage2_5_batches01_06/03_backbone_qc_merged/FGA_rfpeptides_stage2_global_backbone_manifest_pass.csv \
+  --stage0-target-pdb results/rfpeptides_article_route_clean_20260615_fpocket/00_target_inputs/RFpep_Site_2_target.pdb \
+  --output-root results/rfpeptides_head_to_tail_v1_20260718_stage2_5_batches01_06 \
+  --family-rmsd-threshold 4 \
+  --max-selected 312 \
+  --max-per-batch-length 4
+```
+
+The selected panel contains 52 representatives from each batch and 24 from
+each peptide length from 12 through 24. All 312 rows have unique
+`global_backbone_id` and unique `backbone_family_id`.
+
+Stage 3A ProteinMPNN-only preparation command:
+
+```bash
+cd /mnt/c/SH/fga_cyclic_peptide_design
+source ~/fga_model_envs/miniforge3/etc/profile.d/conda.sh
+conda activate fga_stage1_fpocket
+
+python scripts/22_prepare_proteinmpnn_jobs.py \
+  --stage2-5-root results/rfpeptides_head_to_tail_v1_20260718_stage2_5_batches01_06 \
+  --project-config config/rfpeptides_head_to_tail.yaml \
+  --output-root results/rfpeptides_head_to_tail_v1_20260718_stage2_5_batches01_06 \
+  --stage2-selection-csv results/rfpeptides_head_to_tail_v1_20260718_stage2_5_batches01_06/04_backbone_diversity/FGA_rfpeptides_stage2_5_selected_backbones.csv \
+  --dl-binder-design-root /mnt/c/SH/peptide_str/dl_binder_design \
+  --seqs-per-backbone 8 \
+  --relax-cycles 0 \
+  --temperature 0.10 \
+  --omit-aas CX
+```
+
+Prepared but not executed:
+
+```text
+04_proteinmpnn_inputs/FGA_rfpeptides_stage3_312bp_7426f7fdb327_jobs.csv
+04_proteinmpnn_inputs/FGA_rfpeptides_stage3_312bp_7426f7fdb327_runlist.txt
+04_proteinmpnn_inputs/run_stage3_312bp_7426f7fdb327.sh
+04_proteinmpnn_inputs/pdbs_proteinmpnn_only/stage3_312bp_7426f7fdb327/
+```
+
+The preparation result is 312 one-to-one jobs and 312 normalized input PDBs.
+The runlist has 312 unique global-ID tags. Running the generated shell script
+is the separate Stage 3B model-execution step.
