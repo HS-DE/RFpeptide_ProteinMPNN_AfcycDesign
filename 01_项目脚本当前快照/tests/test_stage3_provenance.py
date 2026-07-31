@@ -28,7 +28,13 @@ stage23 = _load_script("stage23_under_test", "23_collect_proteinmpnn_sequences.p
 import common  # noqa: E402
 
 
-ACTIVE_CONFIG = SCRIPTS_DIR.parents[1] / "05_配置快照" / "config" / "rfpeptides_head_to_tail.yaml"
+SNAPSHOT_ROOT = SCRIPTS_DIR.parent
+CONFIG_DIR = (
+    SNAPSHOT_ROOT / "config"
+    if (SNAPSHOT_ROOT / "config").is_dir()
+    else SCRIPTS_DIR.parents[1] / "05_配置快照" / "config"
+)
+ACTIVE_CONFIG = CONFIG_DIR / "rfpeptides_head_to_tail.yaml"
 
 
 def _atom(serial: int, chain: str, resi: int, x: float) -> str:

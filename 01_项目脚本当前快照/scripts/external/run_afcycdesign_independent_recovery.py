@@ -12,22 +12,38 @@ from typing import Any, Mapping
 LEGAL_AA = set("ACDEFGHIKLMNPQRSTVWY")
 CACHE_IDENTITY_FIELDS = (
     "stage5_job_id",
+    "stage5_candidate_id",
+    "global_backbone_id",
+    "backbone_family_id",
+    "source_batch_label",
+    "source_stage4_design_id",
+    "source_stage4_scored_pdb_sha256",
+    "stage4_run_id",
+    "stage4_protocol_identity_sha256",
+    "stage4_run_group_id",
+    "stage4_scores_csv_sha256",
+    "stage4_top_candidates_csv_sha256",
+    "stage4_validation_selection_rank",
     "target_sequence",
     "peptide_sequence",
     "target_sequence_hash",
     "peptide_sequence_hash",
     "protocol_hash",
+    "protocol_version",
     "seed",
+    "models_per_seed",
     "requested_recycles",
     "forward_passes",
     "colabdesign_commit",
     "cyclic_chain_index",
+    "cyclic_topology_encoding",
     "template_mode",
     "use_initial_guess",
     "target_msa_mode",
     "peptide_msa_mode",
     "use_mlm",
     "mlm_replace_fraction",
+    "validation_test_type",
 )
 
 
@@ -50,6 +66,18 @@ def _read_job_spec(path: Path) -> dict[str, Any]:
         spec = json.load(handle)
     required = [
         "stage5_job_id",
+        "stage5_candidate_id",
+        "global_backbone_id",
+        "backbone_family_id",
+        "source_batch_label",
+        "source_stage4_design_id",
+        "source_stage4_scored_pdb_sha256",
+        "stage4_run_id",
+        "stage4_protocol_identity_sha256",
+        "stage4_run_group_id",
+        "stage4_scores_csv_sha256",
+        "stage4_top_candidates_csv_sha256",
+        "stage4_validation_selection_rank",
         "target_sequence",
         "target_sequence_length",
         "target_sequence_hash",
@@ -57,7 +85,9 @@ def _read_job_spec(path: Path) -> dict[str, Any]:
         "peptide_sequence_length",
         "peptide_sequence_hash",
         "protocol_hash",
+        "protocol_version",
         "cyclic_chain_index",
+        "cyclic_topology_encoding",
         "seed",
         "models_per_seed",
         "requested_recycles",
@@ -211,6 +241,76 @@ def _verify_colabdesign_source_marker(spec: Mapping[str, Any]) -> tuple[Path, st
     if loaded_commit != expected_commit:
         raise RuntimeError(f"ColabDesign source commit is {loaded_commit}, expected {expected_commit}")
     return source_dir, loaded_commit
+
+
+def _verify_cyclic_offset_static(spec: Mapping[str, Any]) -> None:
+    import numpy as np
+    from colabdesign.af.contrib.cyclic import add_cyclic_offset
+
+    target_length = int(spec["target_sequence_length"])
+    peptide_length = int(spec["peptide_sequence_length"])
+
+    class DummyModel:
+        pass
+
+    model = DummyModel()
+    model._lengths = [target_length, peptide_length]
+    model._inputs = {
+        "residue_index": np.concatenate(
+            [np.arange(target_length), np.arange(peptide_length)]
+        )
+    }
+    linear = (
+        model._inputs["residue_index"][:, None]
+        - model._inputs["residue_index"][None, :]
+    )
+    add_cyclic_offset(model, [int(spec["cyclic_chain_index"])])
+    offset = np.asarray(model._inputs.get("offset"))
+    if offset.shape != linear.shape:
+        raise RuntimeError("Cyclic offset matrix shape is invalid")
+    if not np.array_equal(
+        offset[:target_length, :target_length],
+        linear[:target_length, :target_length],
+    ):
+        raise RuntimeError("Cyclic offset incorrectly changed the target-chain block")
+    if not np.array_equal(
+        offset[:target_length, target_length:],
+        linear[:target_length, target_length:],
+    ):
+        raise RuntimeError("Cyclic offset incorrectly changed target-to-peptide offsets")
+    if not np.array_equal(
+        offset[target_length:, :target_length],
+        linear[target_length:, :target_length],
+    ):
+        raise RuntimeError("Cyclic offset incorrectly changed peptide-to-target offsets")
+    peptide_block = offset[target_length:, target_length:]
+    if peptide_length > 2 and np.array_equal(
+        peptide_block,
+        linear[target_length:, target_length:],
+    ):
+        raise RuntimeError("Peptide-chain block was not cyclically encoded")
+    if peptide_length > 1 and abs(int(peptide_block[0, -1])) != 1:
+        raise RuntimeError("Peptide terminal positions are not adjacent in the cyclic offset matrix")
+
+
+def _preflight(spec: Mapping[str, Any], af_params: Path) -> None:
+    source_dir, loaded_commit = _verify_colabdesign_source_marker(spec)
+    if not af_params.is_dir():
+        raise RuntimeError(f"AlphaFold parameter directory does not exist: {af_params}")
+    import colabdesign
+
+    loaded_module = Path(colabdesign.__file__).resolve()
+    if source_dir != loaded_module and source_dir not in loaded_module.parents:
+        raise RuntimeError(
+            f"Imported colabdesign from {loaded_module}, expected pinned source {source_dir}"
+        )
+    _verify_cyclic_offset_static(spec)
+    print(
+        f"PASS: {spec['stage5_candidate_id']} independent-recovery input "
+        f"target={spec['target_sequence_length']}, peptide={spec['peptide_sequence_length']}, "
+        f"template=none, initial_guess=false, commit={loaded_commit}",
+        flush=True,
+    )
 
 
 def _completed_output_is_valid(
@@ -472,6 +572,7 @@ def main() -> int:
     parser.add_argument("--job-spec")
     parser.add_argument("--af-params")
     parser.add_argument("--audit-imports", action="store_true")
+    parser.add_argument("--preflight-only", action="store_true")
     args = parser.parse_args()
 
     if args.audit_imports:
@@ -479,11 +580,13 @@ def main() -> int:
         return 0
     if not args.job_spec or not args.af_params:
         parser.error("--job-spec and --af-params are required unless --audit-imports is used")
-    if os.environ.get("RUN_STAGE5_PREDICTIONS") != "YES":
-        raise RuntimeError("Prediction is review-gated. Set RUN_STAGE5_PREDICTIONS=YES only after manual approval.")
-
     spec = _read_job_spec(Path(args.job_spec))
     af_params = Path(os.path.expandvars(os.path.expanduser(args.af_params)))
+    if args.preflight_only:
+        _preflight(spec, af_params)
+        return 0
+    if os.environ.get("RUN_STAGE5_PREDICTIONS") != "YES":
+        raise RuntimeError("Prediction is review-gated. Set RUN_STAGE5_PREDICTIONS=YES only after manual approval.")
     if not af_params.is_dir():
         raise RuntimeError(f"AlphaFold parameter directory does not exist: {af_params}")
     _run_prediction(spec, af_params)

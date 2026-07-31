@@ -31,6 +31,11 @@ from common import (
     write_markdown,
 )
 from pdb_utils import parse_residues, residue_sequence
+from stage5_contract import (
+    STAGE4_IDENTITY_FIELDS,
+    load_prepared_stage5_contract,
+    stage4_identity_values,
+)
 
 
 BACKBONE_ATOMS = ("N", "CA", "C")
@@ -41,6 +46,7 @@ MODEL_FIELDS = [
     "protocol_hash",
     "batch",
     "backbone_id",
+    *STAGE4_IDENTITY_FIELDS,
     "peptide_sequence",
     "seed",
     "model_name",
@@ -118,6 +124,7 @@ CANDIDATE_FIELDS = [
     "stage5B_candidate_id",
     "batch",
     "backbone_id",
+    *STAGE4_IDENTITY_FIELDS,
     "peptide_sequence",
     "models_expected",
     "models_completed",
@@ -377,6 +384,18 @@ def _protocol_identity_valid(
     metadata: Mapping[str, Any],
     metric: Mapping[str, str],
 ) -> bool:
+    identity_checks = []
+    for field in [
+        *STAGE4_IDENTITY_FIELDS,
+        "peptide_sequence_hash",
+        "protocol_hash",
+    ]:
+        identity_checks.extend(
+            [
+                str(metadata.get(field, "")) == str(manifest.get(field, "")),
+                str(job.get(field, "")) == str(manifest.get(field, "")),
+            ]
+        )
     checks = [
         metadata.get("stage5B_job_id") == job.get("stage5B_job_id"),
         metadata.get("stage5B_candidate_id") == manifest.get("stage5B_candidate_id"),
@@ -391,6 +410,7 @@ def _protocol_identity_valid(
         int(metadata.get("peptide_template_residues_covered", -1)) == 0,
         metric.get("stage5B_job_id") == job.get("stage5B_job_id"),
         metric.get("target_template_sha1") == manifest.get("target_template_sha1"),
+        *identity_checks,
     ]
     return all(checks)
 
@@ -538,6 +558,7 @@ def _model_row(
         "protocol_hash": manifest["protocol_hash"],
         "batch": manifest["batch"],
         "backbone_id": manifest["backbone_id"],
+        **stage4_identity_values(manifest),
         "peptide_sequence": manifest["peptide_sequence"],
         "seed": job["seed"],
         "model_name": metric.get("model_name", prediction_pdb.stem),
@@ -693,6 +714,7 @@ def _candidate_summaries(
                 "stage5B_candidate_id": candidate_id,
                 "batch": manifest.get("batch", ""),
                 "backbone_id": manifest.get("backbone_id", ""),
+                **stage4_identity_values(manifest),
                 "peptide_sequence": manifest.get("peptide_sequence", ""),
                 "models_expected": expected_models,
                 "models_completed": completed,
@@ -825,6 +847,8 @@ be interpreted as a valid recovery test for the intended site.
 def main() -> int:
     parser = argparse.ArgumentParser(description="Collect Stage 5B target-conditioned AfCycDesign predictions.")
     parser.add_argument("--stage5b-root", required=True)
+    parser.add_argument("--candidate-manifest-csv", required=True)
+    parser.add_argument("--jobs-csv", required=True)
     parser.add_argument("--stage0-root", required=True)
     parser.add_argument("--project-config", required=True)
     parser.add_argument("--contact-cutoff", type=float, default=5.0)
@@ -837,6 +861,11 @@ def main() -> int:
     parser.add_argument("--max-hotspot-local-rmsd", type=float, default=2.0)
     parser.add_argument("--strong-pose-rmsd", type=float, default=3.0)
     parser.add_argument("--moderate-pose-rmsd", type=float, default=5.0)
+    parser.add_argument(
+        "--validate-inputs-only",
+        action="store_true",
+        help="Validate prepared candidates, jobs, and job specs without parsing predictions.",
+    )
     args = parser.parse_args()
     if args.macrocycle_warn_distance < args.macrocycle_pass_distance:
         raise RuntimeError("--macrocycle-warn-distance must be >= --macrocycle-pass-distance")
@@ -849,24 +878,19 @@ def main() -> int:
     stage0_root = _resolve_mixed_path(args.stage0_root)
     assert_active_route_path(stage5b_dir, "Stage 31 Stage 5B root")
     assert_active_route_path(stage0_root, "Stage 31 Stage 0 root")
-    route_manifest_path, route_manifest, route_manifest_sha256 = load_route_manifest(stage5b_dir.parent)
-    validate_route_project_config(args.project_config, route_manifest)
-    route_provenance = route_provenance_fields(route_manifest_path, route_manifest, route_manifest_sha256)
+    prepared = load_prepared_stage5_contract(
+        stage_output_dir=stage5b_dir,
+        candidate_manifest_csv=args.candidate_manifest_csv,
+        jobs_csv=args.jobs_csv,
+        project_config=args.project_config,
+        candidate_id_field="stage5B_candidate_id",
+        job_id_field="stage5B_job_id",
+        job_candidate_id_field="stage5B_candidate_id",
+    )
+    route_provenance = prepared["route_provenance"]
     stage0_dir = stage0_root / "00_target_inputs"
-    manifest_csv = stage5b_dir / "FGA_rfpeptides_stage5B_candidate_manifest.csv"
-    jobs_csv = stage5b_dir / "FGA_rfpeptides_stage5B_prediction_jobs.csv"
-    assert_active_route_path(manifest_csv, "Stage 31 Stage 5B candidate manifest CSV")
-    assert_active_route_path(jobs_csv, "Stage 31 Stage 5B prediction jobs CSV")
-    manifest_rows = read_csv(manifest_csv)
-    job_rows = read_csv(jobs_csv)
-    if not manifest_rows or not job_rows:
-        raise RuntimeError(f"Missing Stage 5B manifest or jobs CSV: {stage5b_dir}")
-    for row in manifest_rows:
-        validate_row_route_provenance(row, route_provenance, "Stage 31 Stage 5B candidate row")
-        validate_source_route_provenance(row, "Stage 31 Stage 5B candidate row")
-    for row in job_rows:
-        validate_row_route_provenance(row, route_provenance, "Stage 31 Stage 5B job row")
-        validate_source_route_provenance(row, "Stage 31 Stage 5B job row")
+    manifest_rows = list(prepared["candidates"])
+    job_rows = list(prepared["jobs"])
     manifest_lookup = {row["stage5B_candidate_id"]: row for row in manifest_rows}
     target_template = stage0_dir / "RFpep_Site_2_target.pdb"
     assert_active_route_path(target_template, "Stage 31 Stage 0 target template")
@@ -881,24 +905,65 @@ def main() -> int:
         86,
     )
 
+    if args.validate_inputs_only:
+        logger.info("Stage 5B prepared contract validated: %s candidates, %s jobs", len(manifest_rows), len(job_rows))
+        logger.info("No prediction outputs were parsed or written.")
+        return 0
+
     model_rows: list[dict[str, Any]] = []
     for job in job_rows:
         manifest = manifest_lookup.get(job["stage5B_candidate_id"])
         if manifest is None:
-            logger.error("No manifest row for job %s", job.get("stage5B_job_id", ""))
-            continue
+            raise RuntimeError(f"No manifest row for authoritative job {job.get('stage5B_job_id', '')}")
         prediction_dir = _resolve_mixed_path(job["prediction_output_dir"])
         assert_active_route_path(prediction_dir, "Stage 31 prediction directory", must_exist=False)
         metadata_path = prediction_dir / "run_metadata.json"
         metrics_path = prediction_dir / "model_metrics.csv"
         if not metadata_path.is_file() or not metrics_path.is_file():
-            continue
+            raise RuntimeError(
+                f"Missing authoritative Stage 5B output for {job['stage5B_job_id']}: "
+                "run_metadata.json and model_metrics.csv must both exist"
+            )
         assert_active_route_path(metadata_path, "Stage 31 run metadata JSON")
         assert_active_route_path(metrics_path, "Stage 31 model metrics CSV")
         try:
             metadata = json.loads(metadata_path.read_text(encoding="utf-8"))
             with metrics_path.open("r", encoding="utf-8", newline="") as handle:
                 metrics = list(csv.DictReader(handle))
+            for field in [
+                *STAGE4_IDENTITY_FIELDS,
+                "stage5B_job_id",
+                "stage5B_candidate_id",
+                "peptide_sequence_hash",
+                "protocol_hash",
+                "target_template_sha1",
+                "seed",
+                "requested_recycles",
+                "forward_passes",
+                "template_mode",
+                "use_initial_guess",
+                "cyclic_topology_encoding",
+            ]:
+                expected = job.get(field, manifest.get(field, ""))
+                if str(metadata.get(field, "")).lower() != str(expected).lower():
+                    raise RuntimeError(
+                        f"Stage 5B runtime metadata mismatch for {job['stage5B_job_id']} / {field}"
+                    )
+            expected_models = int(job["models_per_seed"])
+            if len(metrics) != expected_models:
+                raise RuntimeError(
+                    f"Stage 5B job {job['stage5B_job_id']} has {len(metrics)} model records; "
+                    f"expected {expected_models}"
+                )
+            if int(metadata.get("prediction_count", -1)) != expected_models:
+                raise RuntimeError(
+                    f"Stage 5B runtime metadata prediction_count mismatch for {job['stage5B_job_id']}"
+                )
+            model_names = [str(metric.get("model_name", "")).strip() for metric in metrics]
+            if any(not name for name in model_names) or len(set(model_names)) != expected_models:
+                raise RuntimeError(
+                    f"Stage 5B job {job['stage5B_job_id']} has duplicate or empty model names"
+                )
             reference_pdb = _resolve_mixed_path(manifest["staged_reference_design_pdb"])
             assert_active_route_path(reference_pdb, "Stage 31 staged reference PDB")
             reference_chains = parse_residues(reference_pdb)
@@ -908,8 +973,30 @@ def main() -> int:
                 prediction_pdb = _resolve_mixed_path(metric.get("prediction_pdb", ""))
                 prediction_npz = _resolve_mixed_path(metric.get("prediction_npz", ""))
                 if not prediction_pdb.is_file() or not prediction_npz.is_file():
-                    logger.error("Missing Stage 5B PDB/NPZ pair for %s", metric.get("model_name", ""))
-                    continue
+                    raise RuntimeError(
+                        f"Missing Stage 5B PDB/NPZ pair for {job['stage5B_job_id']} / "
+                        f"{metric.get('model_name', '')}"
+                    )
+                if (
+                    prediction_pdb.parent.resolve() != prediction_dir.resolve()
+                    or prediction_npz.parent.resolve() != prediction_dir.resolve()
+                ):
+                    raise RuntimeError(
+                        f"Stage 5B metric output escaped its authoritative job directory: {job['stage5B_job_id']}"
+                    )
+                for field in (
+                    "stage5B_job_id",
+                    "stage5B_candidate_id",
+                    "peptide_sequence_hash",
+                    "protocol_hash",
+                    "target_template_sha1",
+                    "seed",
+                ):
+                    expected = job.get(field, manifest.get(field, ""))
+                    if str(metric.get(field, "")).lower() != str(expected).lower():
+                        raise RuntimeError(
+                            f"Stage 5B model metric mismatch for {job['stage5B_job_id']} / {field}"
+                        )
                 assert_active_route_path(prediction_pdb, "Stage 31 prediction PDB")
                 assert_active_route_path(prediction_npz, "Stage 31 prediction NPZ")
                 model_rows.append(
@@ -928,11 +1015,30 @@ def main() -> int:
                     )
                 )
         except Exception as exc:
-            logger.error("Failed to parse job %s: %s: %s", job.get("stage5B_job_id", ""), exc.__class__.__name__, exc)
+            raise RuntimeError(
+                f"Failed to parse authoritative job {job.get('stage5B_job_id', '')}: "
+                f"{exc.__class__.__name__}: {exc}"
+            ) from exc
 
-    expected_models_per_candidate = 25
+    jobs_per_candidate = {
+        candidate_id: sum(row["stage5B_candidate_id"] == candidate_id for row in job_rows)
+        for candidate_id in manifest_lookup
+    }
+    expected_seed_counts = set(jobs_per_candidate.values())
+    models_per_seed_values = {int(row["models_per_seed"]) for row in job_rows}
+    if len(expected_seed_counts) != 1 or len(models_per_seed_values) != 1:
+        raise RuntimeError("Stage 5B job table has inconsistent seeds/models per candidate")
+    expected_seeds = next(iter(expected_seed_counts))
+    models_per_seed = next(iter(models_per_seed_values))
+    expected_models_per_candidate = expected_seeds * models_per_seed
+    expected_total_models = len(job_rows) * models_per_seed
     add_route_provenance(model_rows, route_provenance)
-    candidate_rows = _candidate_summaries(manifest_rows, model_rows, expected_models_per_candidate, 5)
+    candidate_rows = _candidate_summaries(
+        manifest_rows,
+        model_rows,
+        expected_models_per_candidate,
+        expected_seeds,
+    )
     add_route_provenance(candidate_rows, route_provenance)
     write_csv(stage5b_dir / "FGA_rfpeptides_stage5B_model_results.csv", model_rows, MODEL_FIELDS)
     write_csv(stage5b_dir / "FGA_rfpeptides_stage5B_candidate_summary.csv", candidate_rows, CANDIDATE_FIELDS)
@@ -940,7 +1046,7 @@ def main() -> int:
         stage5b_dir / "FGA_rfpeptides_stage5B_validation_report.md",
         _report(model_rows, candidate_rows, job_rows, args, stage5b_dir),
     )
-    logger.info("Stage 5B model predictions parsed: %s/125", len(model_rows))
+    logger.info("Stage 5B model predictions parsed: %s/%s", len(model_rows), expected_total_models)
     logger.info("Stage 5B candidate summaries: %s", len(candidate_rows))
     logger.info("Output directory: %s", stage5b_dir)
     return 0

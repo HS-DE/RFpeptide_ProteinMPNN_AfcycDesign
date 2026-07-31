@@ -40,9 +40,18 @@ def _load_stage20():
     return module
 
 
-ACTIVE_CONFIG = REPO_ROOT / "05_配置快照" / "config" / "rfpeptides_head_to_tail.yaml"
-LEGACY_CONFIG = REPO_ROOT / "05_配置快照" / "config" / "project_legacy_disulfide.yaml"
-PROJECT_CONFIG = REPO_ROOT / "05_配置快照" / "config" / "project.yaml"
+CONFIG_DIR = (
+    SNAPSHOT_ROOT / "config"
+    if (SNAPSHOT_ROOT / "config").is_dir()
+    else REPO_ROOT / "05_配置快照" / "config"
+)
+ACTIVE_CONFIG = CONFIG_DIR / "rfpeptides_head_to_tail.yaml"
+PROJECT_CONFIG = CONFIG_DIR / "project.yaml"
+LEGACY_CONFIG = (
+    CONFIG_DIR / "project_legacy_disulfide.yaml"
+    if (CONFIG_DIR / "project_legacy_disulfide.yaml").is_file()
+    else PROJECT_CONFIG
+)
 
 
 class RouteManifestTests(unittest.TestCase):
@@ -297,7 +306,7 @@ class MultiSourceRouteTests(unittest.TestCase):
         path.parent.mkdir(parents=True, exist_ok=True)
         path.write_text("\n".join(lines + ["END"]) + "\n", encoding="utf-8")
 
-    def test_stage26_merges_two_source_runs_with_per_candidate_provenance(self) -> None:
+    def test_stage26_locks_one_stage4_run_and_exact_top_table(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)
             stage0_root = root / "stage0"
@@ -316,66 +325,126 @@ class MultiSourceRouteTests(unittest.TestCase):
             )
             _, config_sha, effective_sha = common.load_active_route_config(ACTIVE_CONFIG)
             hotspots = ["A82", "A84", "A85", "A86"]
-            source_roots = []
+            source_root = root / "aggregate_route"
+            manifest_path, manifest, manifest_sha = common.write_route_manifest(
+                source_root,
+                {
+                    "batch_id": "fixture_aggregate",
+                    "site_labels": ["RFpep_Site_2"],
+                    "protocol_peptide_length_min": 12,
+                    "protocol_peptide_length_max": 24,
+                    "run_peptide_length_min": 12,
+                    "run_peptide_length_max": 12,
+                    "num_designs_requested": 2,
+                    "project_config": str(ACTIVE_CONFIG),
+                    "project_config_sha256": config_sha,
+                    "effective_project_config_sha256": effective_sha,
+                    "stage0_sites": [
+                        {
+                            "site_label": "RFpep_Site_2",
+                            "target_pdb": str(target_pdb),
+                            "target_pdb_sha256": common.sha256_file(target_pdb),
+                            "mapping_csv": str(mapping_csv),
+                            "mapping_csv_sha256": common.sha256_file(mapping_csv),
+                            "normalized_hotspots": hotspots,
+                            "normalized_hotspots_sha256": common.canonical_json_sha256(hotspots),
+                        }
+                    ],
+                },
+            )
+            route = common.route_provenance_fields(manifest_path, manifest, manifest_sha)
+            source_provenance = {
+                "source_run_id": manifest["run_id"],
+                "source_batch_id": manifest["batch_id"],
+                "source_route_manifest": str(manifest_path),
+                "source_route_manifest_sha256": manifest_sha,
+            }
+            stage4_run_id = "stage4_fixture"
+            stage4_protocol = "d" * 64
+            run_group_id = "stage3_fixture"
+            stage4_dir = source_root / "06_rosetta_scoring" / stage4_run_id
             sequences = ["AVILMFWYKRDE", "DEKRWYFMILVA"]
+            full_rows = []
+            top_rows = []
             for idx, sequence in enumerate(sequences, start=1):
-                source_root = root / f"source_{idx}"
-                source_roots.append(source_root)
-                manifest_path, manifest, manifest_sha = common.write_route_manifest(
-                    source_root,
-                    {
-                        "batch_id": f"fixture_batch_{idx}",
-                        "site_labels": ["RFpep_Site_2"],
-                        "protocol_peptide_length_min": 12,
-                        "protocol_peptide_length_max": 24,
-                        "run_peptide_length_min": 12,
-                        "run_peptide_length_max": 12,
-                        "num_designs_requested": 1,
-                        "project_config": str(ACTIVE_CONFIG),
-                        "project_config_sha256": config_sha,
-                        "effective_project_config_sha256": effective_sha,
-                        "stage0_sites": [
-                            {
-                                "site_label": "RFpep_Site_2",
-                                "target_pdb": str(target_pdb),
-                                "target_pdb_sha256": common.sha256_file(target_pdb),
-                                "mapping_csv": str(mapping_csv),
-                                "mapping_csv_sha256": common.sha256_file(mapping_csv),
-                                "normalized_hotspots": hotspots,
-                                "normalized_hotspots_sha256": common.canonical_json_sha256(hotspots),
-                            }
-                        ],
-                    },
-                )
-                route = common.route_provenance_fields(manifest_path, manifest, manifest_sha)
                 design_pdb = root / f"design_{idx}.pdb"
                 self._write_stage5_fixture_pdb(design_pdb, sequence)
+                design_sha256 = common.sha256_file(design_pdb)
                 row = {
                     "stage4_design_id": f"stage4_{idx}",
-                    "backbone_id": f"RFpep_Site_2_fixture_{idx}",
+                    "stage4_run_id": stage4_run_id,
+                    "stage4_protocol_identity_sha256": stage4_protocol,
+                    "run_group_id": run_group_id,
+                    "global_backbone_id": f"global_fixture_{idx}",
+                    "backbone_family_id": f"family_fixture_{idx}",
+                    "source_batch_label": f"fixture_batch_{idx}",
                     "site_label": "RFpep_Site_2",
                     "site_id": "site2",
+                    "input_pdb": str(design_pdb),
+                    "input_pdb_sha256": design_sha256,
                     "scored_pdb": str(design_pdb),
+                    "scored_pdb_sha256": design_sha256,
+                    "target_chain": "A",
+                    "peptide_chain": "B",
                     "peptide_sequence": sequence,
                     "peptide_length": len(sequence),
                     "pass_stage4_qc": "true",
+                    "pyrosetta_score_status": "success",
                     "macrocycle_geometry_status": "pass_head_to_tail_macrocycle",
                     "target_site_recovery_status": "site_contact_pass",
                     "hotspot_recovery_status": "hotspot_contact_pass",
                     "clash_status": "pass_no_severe_clash",
                     "detached_or_collapsed_flag": "pass_basic_pose_geometry",
+                    "stage4_failure_reasons": "",
                     "ddg_proxy_no_repack": -float(idx),
+                    "ddg_proxy_per_peptide_residue": -float(idx) / len(sequence),
+                    "ddg_proxy_per_target_contact": -float(idx) / 10,
+                    "ddg_proxy_per_site_contact": -float(idx) / 4,
                     "num_target_contacts": 10,
                     "num_target_site_contacts": 4,
                     "num_hotspot_contacts": 2,
-                    "stage4_priority_rank": 1,
+                    "macrocycle_terminal_cn_distance": 1.33,
+                    "sequence_liability_notes": "",
+                    "stage4_validation_selection_rank": idx,
+                    "stage4_priority_rank": idx,
+                    "stage4_priority_class": "priority_1_validation_ready",
                     **route,
+                    **source_provenance,
                 }
-                common.write_csv(
-                    source_root / "06_rosetta_scoring" / "FGA_rfpeptides_stage4_rosetta_interface_scores_pass.csv",
-                    [row],
-                    list(row),
+                full_rows.append(row)
+                top_rows.append(
+                    {
+                        "stage4_validation_selection_rank": idx,
+                        "stage4_priority_rank": idx,
+                        "stage4_priority_class": row["stage4_priority_class"],
+                        "stage4_design_id": row["stage4_design_id"],
+                        "stage4_run_id": stage4_run_id,
+                        "stage4_protocol_identity_sha256": stage4_protocol,
+                        "run_group_id": run_group_id,
+                        "global_backbone_id": row["global_backbone_id"],
+                        "backbone_family_id": row["backbone_family_id"],
+                        "source_batch_label": row["source_batch_label"],
+                        "peptide_sequence": sequence,
+                        "peptide_length": len(sequence),
+                        "scored_pdb": str(design_pdb),
+                        "scored_pdb_sha256": design_sha256,
+                        "ddg_proxy_no_repack": row["ddg_proxy_no_repack"],
+                        "ddg_proxy_per_peptide_residue": row["ddg_proxy_per_peptide_residue"],
+                        "ddg_proxy_per_target_contact": row["ddg_proxy_per_target_contact"],
+                        "ddg_proxy_per_site_contact": row["ddg_proxy_per_site_contact"],
+                        "site_contacts": row["num_target_site_contacts"],
+                        "hotspot_contacts": row["num_hotspot_contacts"],
+                        "macrocycle_terminal_cn_distance": row["macrocycle_terminal_cn_distance"],
+                        "clash_status": row["clash_status"],
+                        "sequence_liability_notes": "",
+                        "reason_selected": f"fixture rank {idx}",
+                    }
                 )
+
+            scores_csv = stage4_dir / "stage4_scores.csv"
+            top_csv = stage4_dir / "stage4_top.csv"
+            common.write_csv(scores_csv, full_rows, list(full_rows[0]))
+            common.write_csv(top_csv, top_rows, list(top_rows[0]))
 
             output_root = root / "stage5"
             logger = logging.getLogger(f"stage26_fixture_{id(root)}")
@@ -383,8 +452,9 @@ class MultiSourceRouteTests(unittest.TestCase):
             logger.addHandler(logging.NullHandler())
             argv = [
                 "26_prepare_afcycdesign_jobs.py",
-                "--source-run-root", str(source_roots[0]),
-                "--source-run-root", str(source_roots[1]),
+                "--source-run-root", str(source_root),
+                "--stage4-scores-csv", str(scores_csv),
+                "--stage4-top-candidates-csv", str(top_csv),
                 "--stage0-root", str(stage0_root),
                 "--output-root", str(output_root),
                 "--project-config", str(ACTIVE_CONFIG),
@@ -397,14 +467,25 @@ class MultiSourceRouteTests(unittest.TestCase):
                 self.assertEqual(self.stage26.main(), 0)
 
             _, merged_manifest, _ = common.load_route_manifest(output_root)
-            self.assertEqual(len(merged_manifest["source_route_manifests"]), 2)
+            self.assertEqual(len(merged_manifest["source_route_manifests"]), 1)
+            self.assertEqual(merged_manifest["stage4_scores_csv_sha256"], common.sha256_file(scores_csv))
+            self.assertEqual(merged_manifest["stage4_top_candidates_csv_sha256"], common.sha256_file(top_csv))
             rows = common.read_csv(
                 output_root / "07_structure_validation" / "FGA_rfpeptides_stage5_candidate_manifest.csv"
             )
             self.assertEqual(len(rows), 2)
-            self.assertEqual({row["source_batch_id"] for row in rows}, {"fixture_batch_1", "fixture_batch_2"})
-            self.assertTrue(all(Path(row["source_route_manifest"]).is_file() for row in rows))
-            self.assertEqual(len({row["source_route_manifest_sha256"] for row in rows}), 2)
+            self.assertEqual(
+                {row["global_backbone_id"] for row in rows},
+                {"global_fixture_1", "global_fixture_2"},
+            )
+            self.assertEqual(
+                [int(row["stage4_validation_selection_rank"]) for row in rows],
+                [1, 2],
+            )
+            self.assertEqual(
+                {row["stage4_protocol_identity_sha256"] for row in rows},
+                {stage4_protocol},
+            )
 
 
 if __name__ == "__main__":

@@ -19,7 +19,7 @@
 ## 目录
 
 ```text
-01_项目脚本当前快照/       全部 48 个项目脚本
+01_项目脚本当前快照/       当前项目脚本与 provenance 单元测试
 02_RFdiffusion关键运行文件/ 实际 home runtime 6 个文件，并保留本地非运行副本用于差异检查
 03_旧错误路线生成脚本/     归档中实际存在的 100 个 job/runner，禁止执行
 04_旧N20假preflight样例_禁止运行/ 旧 runner；preflight 与 inference 使用不同源码
@@ -41,11 +41,12 @@ Stage 20-31 现在只接受完整的活跃配置：
 05_配置快照/config/rfpeptides_head_to_tail.yaml
 ```
 
-这些脚本要求显式传入 `--project-config` 和各自的上游 run root、候选 ID
-或 source run root。Stage 20 还要求显式 `--batch-id`；Stage 26 使用可重复的
-`--source-run-root` 合并来源，不再内置固定 batch。每个新 Stage 20 run 会写出
+这些脚本要求显式传入 `--project-config` 和各自的上游 run root、候选表
+或 source run root。Stage 20 还要求显式 `--batch-id`。Stage 26 和 Stage 30
+必须同时显式接收当前 aggregate route root、完整 Stage 4 score table 和同一
+隔离 run 的 top-validation table。每个新 Stage 20 run 会写出
 `route_manifest.json`，下游 Stage 21-31 会验证路线版本、Stage 0 文件哈希、
-配置哈希和逐行 provenance，不一致时硬失败。
+配置哈希、全局 backbone 身份和逐行 provenance，不一致时硬失败。
 
 `project.yaml` 继续服务 Stage 00-19 的历史兼容流程；它和
 `project_legacy_disulfide.yaml` 均会被 Stage 20-31 的生产配置加载器拒绝。
@@ -64,12 +65,12 @@ Stage 20-31 现在只接受完整的活跃配置：
 | `23_collect_proteinmpnn_sequences.py` | Stage 3C | 以 Stage 22 jobs 表和 `global_backbone_id` 为唯一契约，精确收集完整 ProteinMPNN 输出集，再检查序列、Site_2/hotspot、宏环和 clash |
 | `24_stage3d1_sidechain_repack.py` | Stage 3D-1 | 仅承接完整 ProteinMPNN-only run group，以 `global_backbone_id` 关联并做 PyRosetta side-chain repack-only；用写出前后 N/CA/C/O 坐标硬验证 backbone 未移动 |
 | `25_stage4_rosetta_interface_scoring.py` | Stage 4A-v2 | 严格承接完整 run-group Stage 3D-1 full/pass 表；只做 no-repack/no-minimization Rosetta score proxy、序列性质和 backbone-diverse validation priority |
-| `26_prepare_afcycdesign_jobs.py` | Stage 5A 准备 | 合并 Stage 4 候选并准备 sequence-based independent-recovery jobs |
-| `27_collect_afcycdesign_validation.py` | Stage 5A 收集 | 解析 independent-recovery 模型并计算位点、姿态、拓扑和置信度 |
+| `26_prepare_afcycdesign_jobs.py` | Stage 5A 准备 | 严格读取同一 Stage 4 run 的完整表和正式 top 5，准备无 template/initial guess 的 sequence-only independent-recovery jobs |
+| `27_collect_afcycdesign_validation.py` | Stage 5A 收集 | 按 candidate/job/spec/runtime identity 精确解析 independent-recovery 模型并计算位点、姿态、拓扑和置信度 |
 | `28_prepare_stage5_target_controls.py` | Stage 5 control | 准备 target-only single-sequence/MLM/MSA 控制 |
 | `29_collect_stage5_target_controls.py` | Stage 5 control | 收集 target-only recovery control |
-| `30_prepare_stage5b_target_conditioned_jobs.py` | Stage 5B 准备 | 准备 target-only-template conditioned recovery；不提供 peptide template/initial guess |
-| `31_collect_stage5b_validation.py` | Stage 5B 收集 | 解析 Stage 5B、统一坐标系并核验 Stage 4 reference 是否真实命中修正后的 Site_2 |
+| `30_prepare_stage5b_target_conditioned_jobs.py` | Stage 5B 准备 | 严格读取同一 Stage 4 run 的完整表和正式 top 5，准备 target-only-template conditioned recovery；不提供 peptide template/initial guess |
+| `31_collect_stage5b_validation.py` | Stage 5B 收集 | 按 candidate/job/spec/runtime identity 精确解析 Stage 5B、统一坐标系并核验 Stage 4 reference 是否真实命中修正后的 Site_2 |
 
 ## Stage 5 外部 runner
 
@@ -84,6 +85,7 @@ Stage 20-31 现在只接受完整的活跃配置：
 | 脚本 | 用途 |
 | --- | --- |
 | `common.py` | 项目路径、CSV、Markdown、日志、活跃路线配置、manifest 和 provenance 校验 |
+| `stage5_contract.py` | Stage 4 -> Stage 5A/5B 共享输入、全局身份、PDB 哈希、hard-gate 和 prepared-job contract 校验 |
 | `pdb_utils.py` | PDB residue/atom 解析和坐标距离函数 |
 | `region_utils.py` | FGA 区域定义和序列切片 |
 | `sequence_filters.py` | 旧路线序列硬过滤函数 |
@@ -223,17 +225,25 @@ Stage 3B 已完整生成 2,496/2,496 个 ProteinMPNN-only PDB。Stage 3C
 
 Stage 3D-1 在同一 global backbone 内跳过 55 条重复序列，对 2,441 条唯一
 结构执行 fixed-backbone side-chain repack；2,372 条通过，69 条仍有 severe
-clash。Stage 25 已适配为严格承接该 run group，并通过真实 input-only
-preflight：
+clash。Stage 4A-v2 已完成：
 
 ```text
 312 Stage 3 jobs
 2496 complete Stage 3C rows
 2441 complete Stage 3D-1 rows
-2372 Stage 3D-1 pass rows selected for Stage 4
-PyRosetta loaded: false
-Stage 4 outputs written: 0
+2372 Stage 3D-1 pass rows scored
+2372 Stage 4 hard-QC pass
+5 backbone-diverse top validation candidates
+Stage 4 run ID: stage4A_v2_stage3_312bp_7426f7fdb327_364531706c6c
 ```
 
-正式 Stage 4A-v2 尚未运行。当前 2,372 条只具备进入 score-only 排序层的
-资格，不是最终 peptide candidates。
+Stage 5A-v3 和 Stage 5B-v2 已适配当前 aggregate route、global backbone
+身份和该唯一 Stage 4 run。两条路线均严格锁定完整 2,372 行 score table 与
+正式 top 5，并把序列、Stage 4 protocol、PDB SHA-256 和 route provenance
+纳入 candidate/job/cache identity。
+
+Stage 5A 和 Stage 5B 各已准备 5 candidates × 5 seeds = 25 个 gated jobs；
+静态 preflight 和 collector input-only validation 均通过，尚未运行任何模型
+预测。Stage 5B 是建议优先运行的 target-structure-conditioned recovery；
+Stage 5A sequence-only independent recovery 保留为探索性对照。二者的结果
+都仍属于结构验证证据，不是 final peptide candidates。

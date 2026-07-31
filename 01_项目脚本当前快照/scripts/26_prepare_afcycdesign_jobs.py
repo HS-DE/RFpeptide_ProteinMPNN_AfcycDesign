@@ -28,10 +28,15 @@ from common import (
     write_markdown,
     write_route_manifest,
 )
+from stage5_contract import (
+    STAGE4_IDENTITY_FIELDS,
+    load_stage4_validation_contract,
+    stage4_identity_values,
+)
 
 
 COLABDESIGN_GAMMA_COMMIT = "5ab4efaba2321a6c3c314b82d2fff8e0241f5c2d"
-PROTOCOL_VERSION = "stage5A_v2_single_sequence_mlm015"
+PROTOCOL_VERSION = "stage5A_v3_active_route_single_sequence_mlm015"
 
 AA3_TO_AA1 = {
     "ALA": "A",
@@ -68,7 +73,7 @@ MANIFEST_FIELDS = [
     "selection_order",
     "batch",
     "backbone_id",
-    "source_stage4_design_id",
+    *STAGE4_IDENTITY_FIELDS,
     "peptide_sequence",
     "peptide_length",
     "site_label",
@@ -122,6 +127,7 @@ JOB_FIELDS = [
     "protocol_hash",
     "batch",
     "backbone_id",
+    *STAGE4_IDENTITY_FIELDS,
     "seed",
     "target_sequence_length",
     "target_sequence_hash",
@@ -137,10 +143,13 @@ JOB_FIELDS = [
     "validation_test_type",
     "uses_template",
     "uses_initial_guess",
+    "template_mode",
+    "use_initial_guess",
     "target_msa_mode",
     "peptide_msa_mode",
     "use_mlm",
     "mlm_replace_fraction",
+    "models_per_seed",
     "requested_recycles",
     "forward_passes",
     "status",
@@ -496,7 +505,7 @@ topology QC.
 
 ## Validation Mode
 
-Primary prepared mode:
+Exploratory prepared mode:
 
 ```text
 validation_test_type: independent_recovery
@@ -660,9 +669,13 @@ hard-coded into this preparation step.
 
 ## Prediction Classification
 
-The prepared primary route is sequence/target-based AfCycDesign independent
-recovery. It uses no template and no initial guess. Design PDBs are retained
-only for post-hoc target alignment and recovery metrics.
+The prepared Stage 5A route is sequence-only AfCycDesign independent recovery.
+It uses no template and no initial guess. Design PDBs are retained only for
+post-hoc target alignment and recovery metrics. Because earlier target-only
+controls showed that this 86-aa target crop is difficult to recover from a
+single sequence, failure here is not by itself evidence that a peptide cannot
+bind. Stage 5B target-structure-conditioned recovery is the practical
+validation route for this target context.
 
 See the full protocol audit:
 
@@ -761,11 +774,19 @@ PYTHONPATH="$OVERLAY_DIR" "$PYTHON_BIN" -c 'import IPython; print("Prepared Stag
 
 
 def _preflight_script(
+    project_root: Path,
+    runner: Path,
+    representative_specs: list[Path],
     afcycdesign_python: str,
     colabdesign_source: str,
     python_overlay: str,
     af_params: str,
 ) -> str:
+    spec_checks = "\n".join(
+        f'"$PYTHON_BIN" {_quote_bash(_to_wsl_path(runner))} --preflight-only '
+        f'--job-spec {_quote_bash(_to_wsl_path(spec))} --af-params "$AF_PARAMS_DIR"'
+        for spec in representative_specs
+    )
     return f"""#!/bin/bash
 set -euo pipefail
 
@@ -807,6 +828,7 @@ if [[ "$current_commit" != "{COLABDESIGN_GAMMA_COMMIT}" ]]; then
   exit 2
 fi
 
+export COLABDESIGN_GAMMA_SOURCE="$SOURCE_DIR"
 export PYTHONPATH="$SOURCE_DIR:$OVERLAY_DIR${{PYTHONPATH:+:$PYTHONPATH}}"
 
 "$PYTHON_BIN" - <<'PY'
@@ -828,7 +850,10 @@ print("PASS: gamma prediction modules and add_cyclic_offset are importable.")
 print("Protocol requirement: template_mode=none; use_initial_guess=false; cyclic chain index=1.")
 PY
 
-echo "PASS: Stage 5 AfCycDesign protocol preflight completed."
+cd {_quote_bash(_to_wsl_path(project_root))}
+{spec_checks}
+
+echo "PASS: Stage 5A AfCycDesign static protocol preflight completed for all candidates."
 """
 
 
@@ -887,10 +912,11 @@ def main() -> int:
     parser = argparse.ArgumentParser(description="Prepare merged Stage 5 AfCycDesign independent-recovery jobs.")
     parser.add_argument(
         "--source-run-root",
-        action="append",
         required=True,
-        help="Upstream run root containing 06_rosetta_scoring. Repeat for each source run.",
+        help="Current aggregate route root containing the isolated Stage 4 run.",
     )
+    parser.add_argument("--stage4-scores-csv", required=True)
+    parser.add_argument("--stage4-top-candidates-csv", required=True)
     parser.add_argument("--stage0-root", required=True)
     parser.add_argument("--output-root", required=True)
     parser.add_argument("--project-config", required=True)
@@ -912,13 +938,18 @@ def main() -> int:
         default="$HOME/fga_model_envs/stage5_afcycdesign_python_overlay",
     )
     parser.add_argument("--af-params", default="$HOME/fga_model_envs/af_params")
+    parser.add_argument(
+        "--validate-inputs-only",
+        action="store_true",
+        help="Validate the complete Stage 4 -> Stage 5A contract without writing jobs.",
+    )
     args = parser.parse_args()
 
     logger = setup_logger("26_prepare_afcycdesign_jobs")
     append_run_header(logger, "26_prepare_afcycdesign_jobs.py")
 
-    if args.candidate_count < 2:
-        raise RuntimeError("--candidate-count must be >= 2")
+    if args.candidate_count < 1:
+        raise RuntimeError("--candidate-count must be >= 1")
     if args.seeds_per_candidate < 1:
         raise RuntimeError("--seeds-per-candidate must be >= 1")
     if args.models_per_seed != 5:
@@ -929,53 +960,25 @@ def main() -> int:
         raise RuntimeError("--expected-target-length must be >= 1")
 
     project_root = resolve_path(".")
-    source_roots = [_resolve_mixed_path(value) for value in args.source_run_root]
-    if len(source_roots) != len({str(path.resolve()) for path in source_roots}):
-        raise RuntimeError("--source-run-root contains duplicate source roots")
-    all_rows: list[dict[str, Any]] = []
-    source_manifests: list[dict[str, Any]] = []
-    source_route_records: list[dict[str, Any]] = []
-    loaded_source_manifests: list[dict[str, Any]] = []
-    for root in source_roots:
-        assert_active_route_path(root, "Stage 26 source run root")
-        manifest_path, source_manifest, source_manifest_sha256 = load_route_manifest(root)
-        validate_route_project_config(args.project_config, source_manifest)
-        source_run_id = str(source_manifest["run_id"])
-        batch = str(source_manifest["batch_id"])
-        source_route_records.append(
-            {"manifest": source_manifest, "manifest_sha256": source_manifest_sha256}
-        )
-        source_provenance = route_provenance_fields(manifest_path, source_manifest, source_manifest_sha256)
-        stage4_csv = root / "06_rosetta_scoring" / "FGA_rfpeptides_stage4_rosetta_interface_scores_pass.csv"
-        assert_active_route_path(stage4_csv, f"Stage 26 Stage 4 pass CSV for {batch}")
-        source_rows = _read_required_csv(stage4_csv)
-        for row in source_rows:
-            validate_row_route_provenance(row, source_provenance, f"Stage 26 Stage 4 row in {batch}")
-        eligible_rows = _eligible_stage4_rows(source_rows, batch)
-        for row in eligible_rows:
-            row.update(
-                {
-                    "source_run_id": source_run_id,
-                    "source_batch_id": batch,
-                    "source_route_manifest": str(manifest_path),
-                    "source_route_manifest_sha256": source_manifest_sha256,
-                }
-            )
-        all_rows.extend(eligible_rows)
-        source_manifests.append(
-            {
-                "run_id": source_run_id,
-                "batch_id": batch,
-                "manifest_path": str(manifest_path),
-                "manifest_sha256": source_manifest_sha256,
-            }
-        )
-        loaded_source_manifests.append(source_manifest)
-    _validate_source_route_set(source_route_records)
-    if not all_rows:
-        raise RuntimeError("No eligible Stage 4 hard-QC rows were found.")
-
-    selected = _select_candidates(all_rows, args.candidate_count)
+    stage4_contract = load_stage4_validation_contract(
+        source_run_root=args.source_run_root,
+        stage4_scores_csv=args.stage4_scores_csv,
+        stage4_top_candidates_csv=args.stage4_top_candidates_csv,
+        project_config=args.project_config,
+        candidate_count=args.candidate_count,
+    )
+    selected = list(stage4_contract["selected_rows"])
+    source_manifest_path = stage4_contract["source_route_manifest_path"]
+    source_manifest = stage4_contract["source_route_manifest"]
+    source_manifest_sha256 = stage4_contract["source_route_manifest_sha256"]
+    source_manifests = [
+        {
+            "run_id": source_manifest["run_id"],
+            "batch_id": source_manifest["batch_id"],
+            "manifest_path": str(source_manifest_path),
+            "manifest_sha256": source_manifest_sha256,
+        }
+    ]
     output_root = _resolve_mixed_path(args.output_root)
     assert_active_route_path(output_root, "Stage 26 output root", must_exist=False)
     output_dir = output_root / "07_structure_validation"
@@ -993,10 +996,8 @@ def main() -> int:
     if not source_target_pdb.exists():
         raise RuntimeError(f"Missing Stage 0 target PDB: {source_target_pdb}")
     target_pdb = target_dir / source_target_pdb.name
-    target_pdb.parent.mkdir(parents=True, exist_ok=True)
-    shutil.copy2(source_target_pdb, target_pdb)
     target_sequence = _validate_sequence(
-        _pdb_chain_sequence(target_pdb, "A"),
+        _pdb_chain_sequence(source_target_pdb, "A"),
         "Stage 0 target PDB chain A sequence",
         args.expected_target_length,
     )
@@ -1009,64 +1010,11 @@ def main() -> int:
     if mapping_target_sequence != target_sequence:
         raise RuntimeError("Stage 0 mapping sequence does not match Stage 0 target PDB chain A sequence")
     target_sequence_hash = _sequence_hash(target_sequence)
-    use_mlm = True
-    mlm_replace_fraction = 0.15
-    protocol_payload = {
-        "protocol_version": PROTOCOL_VERSION,
-        "colabdesign_commit": COLABDESIGN_GAMMA_COMMIT,
-        "model_type": "alphafold2_multimer_v3",
-        "target_msa_mode": "single_sequence",
-        "peptide_msa_mode": "single_sequence",
-        "use_mlm": use_mlm,
-        "mlm_replace_fraction": mlm_replace_fraction,
-        "cyclic_chain_index": 1,
-        "template_mode": "none",
-        "use_initial_guess": False,
-        "models_per_seed": args.models_per_seed,
-        "requested_recycles": args.recycles,
-    }
-    protocol_hash = _protocol_hash(protocol_payload)
-    base_manifest = loaded_source_manifests[0]
-    merged_source_identity = canonical_json_sha256(sorted(source_manifests, key=lambda item: item["run_id"]))
-    merged_manifest_path, merged_manifest, merged_manifest_sha256 = write_route_manifest(
-        output_root,
-        {
-            "batch_id": f"merged_{merged_source_identity[:12]}",
-            "site_labels": list(base_manifest["site_labels"]),
-            "protocol_peptide_length_min": int(base_manifest["protocol_peptide_length_min"]),
-            "protocol_peptide_length_max": int(base_manifest["protocol_peptide_length_max"]),
-            "run_peptide_length_min": min(int(item["run_peptide_length_min"]) for item in loaded_source_manifests),
-            "run_peptide_length_max": max(int(item["run_peptide_length_max"]) for item in loaded_source_manifests),
-            "num_designs_requested": sum(int(item["num_designs_requested"]) for item in loaded_source_manifests),
-            "project_config": base_manifest["project_config"],
-            "project_config_sha256": base_manifest["project_config_sha256"],
-            "effective_project_config_sha256": base_manifest["effective_project_config_sha256"],
-            "stage0_sites": list(base_manifest["stage0_sites"]),
-            "source_route_manifests": sorted(source_manifests, key=lambda item: item["run_id"]),
-            "merged_source_identity_sha256": merged_source_identity,
-            "stage5_protocol": protocol_payload,
-        },
-    )
-    route_provenance = route_provenance_fields(
-        merged_manifest_path,
-        merged_manifest,
-        merged_manifest_sha256,
-    )
-    _write_text_lf(target_dir / "RFpep_Site_2_target.fasta", f">RFpep_Site_2_target\n{target_sequence}")
 
-    runner = project_root / "scripts" / "external" / "run_afcycdesign_independent_recovery.py"
-    if not runner.exists():
-        raise RuntimeError(f"Missing Stage 5 prediction runner: {runner}")
-
-    manifest_rows: list[dict[str, Any]] = []
-    job_rows: list[dict[str, Any]] = []
-    job_scripts: list[Path] = []
-    selected.sort(key=lambda row: (str(row["batch"]), _candidate_sort_key(row)))
-    for selection_order, row in enumerate(selected, start=1):
+    validated_candidates: list[dict[str, Any]] = []
+    for row in selected:
         source_pdb = _resolve_mixed_path(str(row.get("scored_pdb", "")))
         assert_active_route_path(source_pdb, "Stage 26 Stage 4 scored PDB")
-        if not source_pdb.exists():
-            raise RuntimeError(f"Missing Stage 4 scored PDB: {source_pdb}")
         sequence = _validate_sequence(str(row.get("peptide_sequence", "")), "Stage 4 peptide_sequence")
         recorded_length = _parse_int(row.get("peptide_length", ""), len(sequence))
         if recorded_length != len(sequence):
@@ -1090,10 +1038,97 @@ def main() -> int:
             raise RuntimeError(
                 f"Stage 4 CSV peptide_sequence does not match design PDB chain B sequence: {source_pdb}"
             )
+        validated = dict(row)
+        validated["_validated_source_pdb"] = source_pdb
+        validated["_validated_peptide_sequence"] = sequence
+        validated_candidates.append(validated)
+    selected = validated_candidates
+
+    if args.validate_inputs_only:
+        logger.info("Stage 4 -> Stage 5A contract validated: %s candidates", len(selected))
+        logger.info("Stage 4 run ID: %s", stage4_contract["stage4_run_id"])
+        logger.info("No Stage 5A files or predictions were written.")
+        return 0
+
+    target_pdb.parent.mkdir(parents=True, exist_ok=True)
+    shutil.copy2(source_target_pdb, target_pdb)
+    use_mlm = True
+    mlm_replace_fraction = 0.15
+    protocol_payload = {
+        "protocol_version": PROTOCOL_VERSION,
+        "colabdesign_commit": COLABDESIGN_GAMMA_COMMIT,
+        "model_type": "alphafold2_multimer_v3",
+        "target_msa_mode": "single_sequence",
+        "peptide_msa_mode": "single_sequence",
+        "use_mlm": use_mlm,
+        "mlm_replace_fraction": mlm_replace_fraction,
+        "cyclic_chain_index": 1,
+        "template_mode": "none",
+        "use_initial_guess": False,
+        "models_per_seed": args.models_per_seed,
+        "requested_recycles": args.recycles,
+        "stage4_run_id": stage4_contract["stage4_run_id"],
+        "stage4_protocol_identity_sha256": stage4_contract[
+            "stage4_protocol_identity_sha256"
+        ],
+        "stage4_run_group_id": stage4_contract["stage4_run_group_id"],
+        "stage4_scores_csv_sha256": stage4_contract["stage4_scores_csv_sha256"],
+        "stage4_top_candidates_csv_sha256": stage4_contract[
+            "stage4_top_candidates_csv_sha256"
+        ],
+    }
+    protocol_hash = _protocol_hash(protocol_payload)
+    base_manifest = source_manifest
+    merged_source_identity = canonical_json_sha256(source_manifests)
+    merged_manifest_path, merged_manifest, merged_manifest_sha256 = write_route_manifest(
+        output_root,
+        {
+            "batch_id": f"stage5A_{stage4_contract['stage4_run_id']}_{protocol_hash}",
+            "site_labels": list(base_manifest["site_labels"]),
+            "protocol_peptide_length_min": int(base_manifest["protocol_peptide_length_min"]),
+            "protocol_peptide_length_max": int(base_manifest["protocol_peptide_length_max"]),
+            "run_peptide_length_min": int(base_manifest["run_peptide_length_min"]),
+            "run_peptide_length_max": int(base_manifest["run_peptide_length_max"]),
+            "num_designs_requested": int(base_manifest["num_designs_requested"]),
+            "project_config": base_manifest["project_config"],
+            "project_config_sha256": base_manifest["project_config_sha256"],
+            "effective_project_config_sha256": base_manifest["effective_project_config_sha256"],
+            "stage0_sites": list(base_manifest["stage0_sites"]),
+            "source_route_manifests": sorted(source_manifests, key=lambda item: item["run_id"]),
+            "merged_source_identity_sha256": merged_source_identity,
+            "stage5_protocol": protocol_payload,
+            "stage4_scores_csv": str(stage4_contract["stage4_scores_csv"]),
+            "stage4_scores_csv_sha256": stage4_contract["stage4_scores_csv_sha256"],
+            "stage4_top_candidates_csv": str(stage4_contract["stage4_top_candidates_csv"]),
+            "stage4_top_candidates_csv_sha256": stage4_contract[
+                "stage4_top_candidates_csv_sha256"
+            ],
+        },
+    )
+    route_provenance = route_provenance_fields(
+        merged_manifest_path,
+        merged_manifest,
+        merged_manifest_sha256,
+    )
+    _write_text_lf(target_dir / "RFpep_Site_2_target.fasta", f">RFpep_Site_2_target\n{target_sequence}")
+
+    runner = project_root / "scripts" / "external" / "run_afcycdesign_independent_recovery.py"
+    if not runner.exists():
+        raise RuntimeError(f"Missing Stage 5 prediction runner: {runner}")
+
+    manifest_rows: list[dict[str, Any]] = []
+    job_rows: list[dict[str, Any]] = []
+    job_scripts: list[Path] = []
+    representative_specs: list[Path] = []
+    selected.sort(key=lambda row: int(str(row["stage4_validation_selection_rank"])))
+    for selection_order, row in enumerate(selected, start=1):
+        source_pdb = Path(row["_validated_source_pdb"])
+        sequence = str(row["_validated_peptide_sequence"])
         peptide_sequence_hash = _sequence_hash(sequence)
+        global_backbone_hash = _sha1_short(str(row["global_backbone_id"]), 10)
         candidate_id = (
-            f"S5V2_{selection_order:02d}_{row['batch']}_{_safe_token(str(row['backbone_id']))}_"
-            f"seq{peptide_sequence_hash}"
+            f"S5A3_{selection_order:02d}_{row['batch']}_gb{global_backbone_hash}_"
+            f"seq{peptide_sequence_hash}_s4{str(row['stage4_protocol_identity_sha256'])[:8]}"
         )
         staged_pdb = design_dir / f"{candidate_id}_design_pose.pdb"
         staged_pdb.parent.mkdir(parents=True, exist_ok=True)
@@ -1106,7 +1141,7 @@ def main() -> int:
             f">{candidate_id}|mode=independent_recovery|cyclic_chain=2|template=none|initial_guess=false\n{cyclic_notation}",
         )
 
-        selection_reason = _selection_reason(row)
+        selection_reason = str(row.get("selection_reason", "")).strip()
         manifest_rows.append(
             {
                 "stage5_candidate_id": candidate_id,
@@ -1117,7 +1152,7 @@ def main() -> int:
                 "selection_order": selection_order,
                 "batch": row["batch"],
                 "backbone_id": row.get("backbone_id", ""),
-                "source_stage4_design_id": row.get("stage4_design_id", ""),
+                **stage4_identity_values(row),
                 "peptide_sequence": sequence,
                 "peptide_length": len(sequence),
                 "site_label": row.get("site_label", ""),
@@ -1143,7 +1178,7 @@ def main() -> int:
                 "sequence_liability_notes": row.get("sequence_liability_notes", ""),
                 "stage4_priority_rank": row.get("stage4_priority_rank", ""),
                 "stage4_priority_class": row.get("stage4_priority_class", ""),
-                "selection_role": row.get("selection_role", ""),
+                "selection_role": "stage4_top_validation_candidate",
                 "selection_reason": selection_reason,
                 "prediction_protocol": "afcycdesign_gamma_cyclic_offset_no_template",
                 "validation_test_type": "independent_recovery",
@@ -1180,6 +1215,7 @@ def main() -> int:
                 "protocol_version": PROTOCOL_VERSION,
                 "batch": row["batch"],
                 "backbone_id": row.get("backbone_id", ""),
+                **stage4_identity_values(row),
                 "target_sequence": target_sequence,
                 "target_sequence_length": len(target_sequence),
                 "peptide_sequence": sequence,
@@ -1187,6 +1223,7 @@ def main() -> int:
                 "site2_target_indices_1based": site2_indices,
                 "hotspot_target_indices_1based": hotspot_indices,
                 "cyclic_chain_index": 1,
+                "cyclic_topology_encoding": "peptide_chain_relative_position_cyclic_offset",
                 "seed": seed,
                 "models": "all",
                 "models_per_seed": args.models_per_seed,
@@ -1208,6 +1245,8 @@ def main() -> int:
                 **route_provenance,
             }
             _write_text_lf(job_spec, json.dumps(spec, indent=2, sort_keys=True))
+            if seed == 0:
+                representative_specs.append(job_spec)
 
             run_script = jobs_dir / f"run_{job_id}.sh"
             _write_text_lf(
@@ -1231,6 +1270,7 @@ def main() -> int:
                     "protocol_hash": protocol_hash,
                     "batch": row["batch"],
                     "backbone_id": row.get("backbone_id", ""),
+                    **stage4_identity_values(row),
                     "seed": seed,
                     "target_sequence_length": len(target_sequence),
                     "target_sequence_hash": target_sequence_hash,
@@ -1246,10 +1286,13 @@ def main() -> int:
                     "validation_test_type": "independent_recovery",
                     "uses_template": "false",
                     "uses_initial_guess": "false",
+                    "template_mode": "none",
+                    "use_initial_guess": "false",
                     "target_msa_mode": "single_sequence",
                     "peptide_msa_mode": "single_sequence",
                     "use_mlm": str(use_mlm).lower(),
                     "mlm_replace_fraction": mlm_replace_fraction,
+                    "models_per_seed": args.models_per_seed,
                     "requested_recycles": args.recycles,
                     "forward_passes": args.recycles + 1,
                     "status": "prepared_not_run",
@@ -1294,6 +1337,9 @@ def main() -> int:
     _write_text_lf(
         preflight,
         _preflight_script(
+            project_root,
+            runner,
+            representative_specs,
             args.afcycdesign_python,
             args.colabdesign_source,
             args.python_overlay,
@@ -1303,7 +1349,7 @@ def main() -> int:
     _write_text_lf(master_script, _master_script(job_scripts, preflight))
 
     eligible_counts: dict[tuple[str, str], int] = defaultdict(int)
-    for row in all_rows:
+    for row in selected:
         eligible_counts[(str(row["batch"]), str(row["backbone_id"]))] += 1
     write_markdown(
         output_dir / "FGA_rfpeptides_stage5_candidate_manifest.md",
@@ -1316,7 +1362,7 @@ def main() -> int:
         ),
     )
 
-    logger.info("Eligible Stage 4 hard-QC rows: %s", len(all_rows))
+    logger.info("Authoritative Stage 4 top validation rows: %s", len(selected))
     logger.info("Selected Stage 5 candidates: %s", len(manifest_rows))
     logger.info("Prepared seed-level jobs: %s", len(job_rows))
     logger.info("Output directory: %s", output_dir)

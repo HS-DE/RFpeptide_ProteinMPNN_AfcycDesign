@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import argparse
+import json
 import math
 import os
 from collections import defaultdict
@@ -28,6 +29,11 @@ from common import (
     write_markdown,
 )
 from pdb_utils import parse_residues, residue_sequence
+from stage5_contract import (
+    STAGE4_IDENTITY_FIELDS,
+    load_prepared_stage5_contract,
+    stage4_identity_values,
+)
 
 
 BACKBONE_ATOMS = ("N", "CA", "C")
@@ -39,6 +45,7 @@ MODEL_FIELDS = [
     "peptide_sequence_hash",
     "batch",
     "backbone_id",
+    *STAGE4_IDENTITY_FIELDS,
     "peptide_sequence",
     "seed",
     "model_name",
@@ -91,6 +98,7 @@ CANDIDATE_FIELDS = [
     "stage5_candidate_id",
     "batch",
     "backbone_id",
+    *STAGE4_IDENTITY_FIELDS,
     "peptide_sequence",
     "seeds_expected",
     "seeds_completed",
@@ -267,9 +275,13 @@ def _load_site_indices(mapping_csv: Path) -> tuple[set[int], set[int]]:
 
 def _metric_lookup(seed_dir: Path) -> dict[str, dict[str, str]]:
     rows = read_csv(seed_dir / "model_metrics.csv")
+    if not rows:
+        raise RuntimeError(f"Missing or empty model_metrics.csv: {seed_dir}")
     lookup: dict[str, dict[str, str]] = {}
     for row in rows:
         path = _resolve_mixed_path(row.get("prediction_pdb", ""))
+        if not path.name or path.name in lookup:
+            raise RuntimeError(f"Duplicate or empty prediction PDB in model_metrics.csv: {path.name!r}")
         lookup[path.name] = row
     return lookup
 
@@ -410,6 +422,7 @@ def _model_row(
         ),
         "batch": candidate.get("batch", ""),
         "backbone_id": candidate.get("backbone_id", ""),
+        **stage4_identity_values(candidate),
         "peptide_sequence": candidate.get("peptide_sequence", ""),
         "seed": metric.get("seed", ""),
         "model_name": metric.get("model_name", prediction_pdb.stem),
@@ -519,6 +532,7 @@ def _candidate_rows(
                 "stage5_candidate_id": candidate_id,
                 "batch": candidate.get("batch", ""),
                 "backbone_id": candidate.get("backbone_id", ""),
+                **stage4_identity_values(candidate),
                 "peptide_sequence": candidate.get("peptide_sequence", ""),
                 "seeds_expected": candidate.get("seeds_per_candidate", "5"),
                 "seeds_completed": len(seeds_completed),
@@ -644,6 +658,8 @@ models_passing_strict_recovery: {len(model_passes)}
 def main() -> int:
     parser = argparse.ArgumentParser(description="Parse Stage 5 AfCycDesign independent-recovery predictions.")
     parser.add_argument("--stage5-root", required=True)
+    parser.add_argument("--candidate-manifest-csv", required=True)
+    parser.add_argument("--jobs-csv", required=True)
     parser.add_argument("--stage0-root", required=True)
     parser.add_argument("--project-config", required=True)
     parser.add_argument("--selected-candidates", default="")
@@ -654,6 +670,11 @@ def main() -> int:
     parser.add_argument("--max-peptide-backbone-rmsd", type=float, default=4.0)
     parser.add_argument("--min-peptide-plddt", type=float, default=0.60)
     parser.add_argument("--max-interface-pae", type=float, default=15.0)
+    parser.add_argument(
+        "--validate-inputs-only",
+        action="store_true",
+        help="Validate prepared candidates, jobs, and job specs without parsing predictions.",
+    )
     args = parser.parse_args()
 
     logger = setup_logger("27_collect_afcycdesign_validation")
@@ -669,32 +690,40 @@ def main() -> int:
     stage0_root = _resolve_mixed_path(args.stage0_root)
     assert_active_route_path(stage5_root, "Stage 27 Stage 5 root")
     assert_active_route_path(stage0_root, "Stage 27 Stage 0 root")
-    route_manifest_path, route_manifest, route_manifest_sha256 = load_route_manifest(stage5_root.parent)
-    validate_route_project_config(args.project_config, route_manifest)
-    route_provenance = route_provenance_fields(route_manifest_path, route_manifest, route_manifest_sha256)
-    candidate_manifest = stage5_root / "FGA_rfpeptides_stage5_candidate_manifest.csv"
-    assert_active_route_path(candidate_manifest, "Stage 27 candidate manifest CSV")
-    candidates = read_csv(candidate_manifest)
-    if not candidates:
-        raise RuntimeError(f"Missing Stage 5 candidate manifest: {stage5_root}")
+    prepared = load_prepared_stage5_contract(
+        stage_output_dir=stage5_root,
+        candidate_manifest_csv=args.candidate_manifest_csv,
+        jobs_csv=args.jobs_csv,
+        project_config=args.project_config,
+        candidate_id_field="stage5_candidate_id",
+        job_id_field="stage5_job_id",
+        job_candidate_id_field="stage5_candidate_id",
+    )
+    route_provenance = prepared["route_provenance"]
+    candidates = list(prepared["candidates"])
+    job_rows = list(prepared["jobs"])
     selected = set(_split_csv(args.selected_candidates))
     if selected:
         candidates = [row for row in candidates if row.get("stage5_candidate_id", "") in selected]
-    for candidate in candidates:
-        validate_row_route_provenance(
-            candidate,
-            route_provenance,
-            f"Stage 27 candidate {candidate.get('stage5_candidate_id', '')}",
-        )
-        validate_source_route_provenance(
-            candidate,
-            f"Stage 27 candidate {candidate.get('stage5_candidate_id', '')}",
-        )
+        job_rows = [row for row in job_rows if row.get("stage5_candidate_id", "") in selected]
+    if not candidates:
+        raise RuntimeError("No Stage 5 candidates remain after applying --selected-candidates")
+    selected_ids = {str(row["stage5_candidate_id"]) for row in candidates}
+    if {str(row["stage5_candidate_id"]) for row in job_rows} != selected_ids:
+        raise RuntimeError("Selected Stage 5 candidates and authoritative job table do not cover the same IDs")
+
+    if args.validate_inputs_only:
+        logger.info("Stage 5A prepared contract validated: %s candidates, %s jobs", len(candidates), len(job_rows))
+        logger.info("No prediction outputs were parsed or written.")
+        return 0
     mapping_csv = stage0_root / "00_target_inputs" / "RFpep_Site_2_crop_renumbering_mapping.csv"
     assert_active_route_path(mapping_csv, "Stage 27 Stage 0 mapping CSV")
     site_indices, hotspot_indices = _load_site_indices(mapping_csv)
 
     model_rows: list[dict[str, Any]] = []
+    jobs_by_candidate: dict[str, list[Mapping[str, str]]] = defaultdict(list)
+    for job in job_rows:
+        jobs_by_candidate[str(job["stage5_candidate_id"])].append(job)
     for candidate in candidates:
         candidate_id = candidate["stage5_candidate_id"]
         reference_pdb = _resolve_mixed_path(candidate["staged_design_pdb"])
@@ -704,15 +733,79 @@ def main() -> int:
         peptide_chain = candidate.get("peptide_chain", "B") or "B"
         if target_chain not in reference_chains or peptide_chain not in reference_chains:
             raise RuntimeError(f"Reference design lacks expected chains: {reference_pdb}")
-        candidate_dir = stage5_root / "predictions" / candidate_id
-        for seed_dir in sorted(candidate_dir.rglob("seed_*")) if candidate_dir.exists() else []:
+        for job in sorted(jobs_by_candidate[candidate_id], key=lambda row: int(row["seed"])):
+            seed_dir = _resolve_mixed_path(job["prediction_output_dir"])
+            if not seed_dir.is_dir():
+                raise RuntimeError(
+                    f"Missing authoritative Stage 5A output directory for {job['stage5_job_id']}: {seed_dir}"
+                )
+            assert_active_route_path(seed_dir, f"Stage 27 prediction output for {job['stage5_job_id']}")
+            metadata_path = seed_dir / "run_metadata.json"
+            metrics_path = seed_dir / "model_metrics.csv"
+            if not metadata_path.is_file() or not metrics_path.is_file():
+                raise RuntimeError(
+                    f"Stage 5A job output is partial for {job['stage5_job_id']}: "
+                    "run_metadata.json and model_metrics.csv must both exist"
+                )
+            metadata = json.loads(metadata_path.read_text(encoding="utf-8"))
+            for field in [
+                *STAGE4_IDENTITY_FIELDS,
+                "stage5_job_id",
+                "stage5_candidate_id",
+                "peptide_sequence_hash",
+                "protocol_hash",
+            ]:
+                expected = job.get(field, "")
+                if str(metadata.get(field, "")) != str(expected):
+                    raise RuntimeError(
+                        f"Stage 5A runtime metadata mismatch for {job['stage5_job_id']} / {field}"
+                    )
             metrics = _metric_lookup(seed_dir)
-            for prediction_pdb in sorted(seed_dir.glob("*.pdb")):
+            expected_models = int(job["models_per_seed"])
+            if len(metrics) != expected_models:
+                raise RuntimeError(
+                    f"Stage 5A job {job['stage5_job_id']} has {len(metrics)} model records; "
+                    f"expected {expected_models}"
+                )
+            if int(metadata.get("prediction_count", -1)) != expected_models:
+                raise RuntimeError(
+                    f"Stage 5A runtime metadata prediction_count mismatch for {job['stage5_job_id']}"
+                )
+
+            expected_pdbs: dict[str, Path] = {}
+            for name, metric in metrics.items():
+                prediction_pdb = _resolve_mixed_path(metric.get("prediction_pdb", ""))
+                prediction_npz = _resolve_mixed_path(metric.get("prediction_npz", ""))
+                if (
+                    prediction_pdb.parent.resolve() != seed_dir.resolve()
+                    or prediction_npz.parent.resolve() != seed_dir.resolve()
+                ):
+                    raise RuntimeError(
+                        f"Stage 5A metric output escaped its authoritative job directory: {job['stage5_job_id']}"
+                    )
+                if not prediction_pdb.is_file() or not prediction_npz.is_file():
+                    raise RuntimeError(
+                        f"Missing Stage 5A PDB/NPZ pair for {job['stage5_job_id']} / {name}"
+                    )
+                expected_pdbs[name] = prediction_pdb
+            actual_pdb_names = {path.name for path in seed_dir.glob("*.pdb")}
+            if actual_pdb_names != set(expected_pdbs):
+                raise RuntimeError(
+                    f"Stage 5A PDB set does not match model_metrics.csv for {job['stage5_job_id']}"
+                )
+
+            for name in sorted(expected_pdbs):
+                prediction_pdb = expected_pdbs[name]
                 assert_active_route_path(prediction_pdb, f"Stage 27 prediction PDB for {candidate_id}")
-                metric = metrics.get(prediction_pdb.name)
-                if metric is None:
-                    logger.warning("Skipping PDB without model_metrics.csv row: %s", prediction_pdb)
-                    continue
+                metric = metrics[name]
+                if str(metric.get("stage5_job_id", "")) != str(job["stage5_job_id"]):
+                    raise RuntimeError(
+                        f"Prediction metric job ID does not match authoritative job {job['stage5_job_id']}"
+                    )
+                if str(metric.get("protocol_hash", "")) != str(job["protocol_hash"]):
+                    raise RuntimeError(
+                        f"Prediction metric protocol hash does not match authoritative job {job['stage5_job_id']}"
+                    )
                 try:
                     model_rows.append(
                         _model_row(
@@ -726,7 +819,10 @@ def main() -> int:
                         )
                     )
                 except Exception as exc:
-                    logger.error("Failed to parse %s: %s: %s", prediction_pdb, exc.__class__.__name__, exc)
+                    raise RuntimeError(
+                        f"Failed to parse authoritative prediction {prediction_pdb}: "
+                        f"{exc.__class__.__name__}: {exc}"
+                    ) from exc
 
     add_route_provenance(model_rows, route_provenance)
     summaries = _candidate_rows(candidates, model_rows)

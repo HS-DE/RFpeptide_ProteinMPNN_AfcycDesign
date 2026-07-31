@@ -83,12 +83,38 @@ class RequiredCliInputTests(unittest.TestCase):
             "--stage3d1-pass-csv",
             "--project-config",
         ],
-        "26_prepare_afcycdesign_jobs.py": ["--source-run-root", "--stage0-root", "--output-root", "--project-config"],
-        "27_collect_afcycdesign_validation.py": ["--stage5-root", "--stage0-root", "--project-config"],
+        "26_prepare_afcycdesign_jobs.py": [
+            "--source-run-root",
+            "--stage4-scores-csv",
+            "--stage4-top-candidates-csv",
+            "--stage0-root",
+            "--output-root",
+            "--project-config",
+        ],
+        "27_collect_afcycdesign_validation.py": [
+            "--stage5-root",
+            "--candidate-manifest-csv",
+            "--jobs-csv",
+            "--stage0-root",
+            "--project-config",
+        ],
         "28_prepare_stage5_target_controls.py": ["--source-run-root", "--stage0-root", "--output-root", "--project-config"],
         "29_collect_stage5_target_controls.py": ["--control-root", "--stage0-root", "--project-config"],
-        "30_prepare_stage5b_target_conditioned_jobs.py": ["--stage5a-root", "--stage0-root", "--output-root", "--project-config"],
-        "31_collect_stage5b_validation.py": ["--stage5b-root", "--stage0-root", "--project-config"],
+        "30_prepare_stage5b_target_conditioned_jobs.py": [
+            "--source-run-root",
+            "--stage4-scores-csv",
+            "--stage4-top-candidates-csv",
+            "--stage0-root",
+            "--output-root",
+            "--project-config",
+        ],
+        "31_collect_stage5b_validation.py": [
+            "--stage5b-root",
+            "--candidate-manifest-csv",
+            "--jobs-csv",
+            "--stage0-root",
+            "--project-config",
+        ],
     }
 
     def test_all_production_entrypoints_require_upstream_roots(self) -> None:
@@ -124,13 +150,23 @@ class RequiredCliInputTests(unittest.TestCase):
                     if isinstance(node, ast.Call) and isinstance(node.func, ast.Name)
                 }
                 self.assertIn("assert_active_route_path", called_names)
+                contract_calls = {
+                    "load_stage4_validation_contract",
+                    "load_prepared_stage5_contract",
+                }
                 self.assertTrue(
-                    {"load_active_route_config", "validate_route_project_config"} & called_names,
-                    f"{filename} does not use the strict active-route config loader",
+                    {
+                        "load_active_route_config",
+                        "validate_route_project_config",
+                    }
+                    & called_names
+                    or contract_calls & called_names,
+                    f"{filename} does not use a strict active-route contract",
                 )
                 self.assertTrue(
-                    {"load_route_manifest", "write_route_manifest"} & called_names,
-                    f"{filename} does not read or create a route manifest",
+                    {"load_route_manifest", "write_route_manifest"} & called_names
+                    or contract_calls & called_names,
+                    f"{filename} does not read, create, or delegate a route manifest contract",
                 )
 
     def test_no_historical_run_identity_remains_in_active_scripts(self) -> None:

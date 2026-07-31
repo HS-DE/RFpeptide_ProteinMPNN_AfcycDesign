@@ -2801,6 +2801,132 @@ Stage 4A-v2 outputs will be isolated under:
     stage4A_v2_stage3_312bp_7426f7fdb327_<protocol-hash>/
 ```
 
-Current status: Stage 25 code, tests, and real input-only preflight are ready.
-Formal Stage 4 scoring has not been run. Passing Stage 4 remains an
-intermediate ranking result, not a final peptide-candidate claim.
+Formal Stage 4A-v2 completed on 2026-07-31:
+
+```text
+Stage 4 input rows scored: 2372
+Stage 4 passed QC: 2372
+Stage 4 top validation candidates: 5
+Stage 4 run ID: stage4A_v2_stage3_312bp_7426f7fdb327_364531706c6c
+```
+
+The completed output directory is:
+
+```text
+results/rfpeptides_head_to_tail_v1_20260718_stage2_5_batches01_06/
+  06_rosetta_scoring/
+    stage3_312bp_7426f7fdb327/
+      stage4A_v2_stage3_312bp_7426f7fdb327_364531706c6c/
+```
+
+Passing Stage 4 remains an intermediate ranking result, not a final
+peptide-candidate claim.
+
+## Stage 5 active-route preparation, 2026-07-31
+
+Stage 5 validates whether a peptide sequence can recover a compatible cyclic
+peptide/target complex pose. It does not infer a sequence from a structure.
+
+Two protocols are retained with distinct interpretations:
+
+- Stage 5A is sequence-only independent recovery:
+  `template_mode=none`, `use_initial_guess=false`, target and peptide both use
+  single-sequence input, and the cyclic positional offset is applied only to
+  peptide chain B. Because earlier sequence-only recovery of the isolated
+  86-aa target crop was weak, Stage 5A is exploratory.
+- Stage 5B is target-structure-conditioned recovery:
+  the Stage 0 86-aa target-only structure is supplied as a target template;
+  peptide template coverage remains zero, no peptide design coordinates or
+  initial guess are supplied, and the full Stage 4 complex is used only for
+  post-prediction comparison. This is the recommended next protocol, but it is
+  not independent target recovery.
+
+The active Stage 5 contract requires:
+
+- the current aggregate route manifest and project configuration;
+- the complete 2,372-row Stage 4 score table;
+- the exact five-row Stage 4 top-validation table from the same isolated
+  Stage 4 run;
+- matching `global_backbone_id`, `backbone_family_id`, peptide sequence,
+  Stage 4 design identity, protocol identity, and scored-PDB SHA-256;
+- all five Stage 4 hard gates to remain passed;
+- target chain A and peptide chain B sequences to match the Stage 4 tables and
+  Stage 0 target input;
+- candidate/job/cache identities to include peptide sequence and Stage 4
+  provenance, preventing stale outputs from another sequence or protocol from
+  being reused.
+
+The five selected candidates cover five distinct global backbones and five
+distinct Stage 2.5 backbone families. Stage 5A and Stage 5B each prepare:
+
+```text
+candidates: 5
+seeds per candidate: 5
+seed jobs: 25
+AlphaFold model parameter sets per seed: 5
+planned model predictions: 125
+requested recycles: 6
+```
+
+Stage 5A preparation command:
+
+```bash
+cd /mnt/c/SH/fga_cyclic_peptide_design
+source ~/fga_model_envs/miniforge3/etc/profile.d/conda.sh
+conda activate fga_stage1_fpocket
+
+python scripts/26_prepare_afcycdesign_jobs.py \
+  --source-run-root results/rfpeptides_head_to_tail_v1_20260718_stage2_5_batches01_06 \
+  --stage4-scores-csv results/rfpeptides_head_to_tail_v1_20260718_stage2_5_batches01_06/06_rosetta_scoring/stage3_312bp_7426f7fdb327/stage4A_v2_stage3_312bp_7426f7fdb327_364531706c6c/FGA_rfpeptides_stage4A_v2_stage3_312bp_7426f7fdb327_364531706c6c_rosetta_interface_scores.csv \
+  --stage4-top-candidates-csv results/rfpeptides_head_to_tail_v1_20260718_stage2_5_batches01_06/06_rosetta_scoring/stage3_312bp_7426f7fdb327/stage4A_v2_stage3_312bp_7426f7fdb327_364531706c6c/FGA_rfpeptides_stage4A_v2_stage3_312bp_7426f7fdb327_364531706c6c_top_validation_candidates.csv \
+  --stage0-root results/rfpeptides_article_route_clean_20260615_fpocket \
+  --output-root results/rfpeptides_head_to_tail_v1_20260731_stage5A_top5 \
+  --project-config config/rfpeptides_head_to_tail.yaml
+```
+
+Stage 5B preparation command:
+
+```bash
+cd /mnt/c/SH/fga_cyclic_peptide_design
+source ~/fga_model_envs/miniforge3/etc/profile.d/conda.sh
+conda activate fga_stage1_fpocket
+
+python scripts/30_prepare_stage5b_target_conditioned_jobs.py \
+  --source-run-root results/rfpeptides_head_to_tail_v1_20260718_stage2_5_batches01_06 \
+  --stage4-scores-csv results/rfpeptides_head_to_tail_v1_20260718_stage2_5_batches01_06/06_rosetta_scoring/stage3_312bp_7426f7fdb327/stage4A_v2_stage3_312bp_7426f7fdb327_364531706c6c/FGA_rfpeptides_stage4A_v2_stage3_312bp_7426f7fdb327_364531706c6c_rosetta_interface_scores.csv \
+  --stage4-top-candidates-csv results/rfpeptides_head_to_tail_v1_20260718_stage2_5_batches01_06/06_rosetta_scoring/stage3_312bp_7426f7fdb327/stage4A_v2_stage3_312bp_7426f7fdb327_364531706c6c/FGA_rfpeptides_stage4A_v2_stage3_312bp_7426f7fdb327_364531706c6c_top_validation_candidates.csv \
+  --stage0-root results/rfpeptides_article_route_clean_20260615_fpocket \
+  --output-root results/rfpeptides_head_to_tail_v1_20260731_stage5B_top5 \
+  --project-config config/rfpeptides_head_to_tail.yaml
+```
+
+Both preparation commands and their generated static preflights completed
+successfully. The prepared directories contain inputs and gated job scripts
+only; no Stage 5 predictions have been run.
+
+Recommended next execution, Stage 5B only:
+
+```bash
+cd /mnt/c/SH/fga_cyclic_peptide_design
+
+RUN_STAGE5B_PREDICTIONS=YES bash \
+  results/rfpeptides_head_to_tail_v1_20260731_stage5B_top5/07_structure_validation_target_conditioned/jobs/run_stage5B_target_conditioned_recovery_all.sh
+```
+
+After all 25 jobs finish, collect Stage 5B results with:
+
+```bash
+cd /mnt/c/SH/fga_cyclic_peptide_design
+
+~/fga_model_envs/colabdesign-py310/.pixi/envs/default/bin/python \
+  scripts/31_collect_stage5b_validation.py \
+  --stage5b-root results/rfpeptides_head_to_tail_v1_20260731_stage5B_top5/07_structure_validation_target_conditioned \
+  --candidate-manifest-csv results/rfpeptides_head_to_tail_v1_20260731_stage5B_top5/07_structure_validation_target_conditioned/FGA_rfpeptides_stage5B_candidate_manifest.csv \
+  --jobs-csv results/rfpeptides_head_to_tail_v1_20260731_stage5B_top5/07_structure_validation_target_conditioned/FGA_rfpeptides_stage5B_prediction_jobs.csv \
+  --stage0-root results/rfpeptides_article_route_clean_20260615_fpocket \
+  --project-config config/rfpeptides_head_to_tail.yaml
+```
+
+Do not run Stage 5A and Stage 5B concurrently on the same GPU. Stage 5
+predictions and their recovery counts must be reviewed before any peptide is
+described as a validated or final candidate.

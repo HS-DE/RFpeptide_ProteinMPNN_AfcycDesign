@@ -27,16 +27,19 @@ from common import (
     write_route_manifest,
 )
 from pdb_utils import parse_residues, residue_sequence
+from stage5_contract import (
+    STAGE4_IDENTITY_FIELDS,
+    load_stage4_validation_contract,
+    stage4_identity_values,
+)
 
 
 COLABDESIGN_GAMMA_COMMIT = "5ab4efaba2321a6c3c314b82d2fff8e0241f5c2d"
-PROTOCOL_VERSION = "stage5B_v1_target_only_template_single_sequence_no_mlm_dropout"
-SOURCE_STAGE5A_PROTOCOL_VERSION = "stage5A_v2_single_sequence_mlm015"
+PROTOCOL_VERSION = "stage5B_v2_active_route_target_only_template_single_sequence_no_mlm_dropout"
 LEGAL_AA = set("ACDEFGHIKLMNPQRSTVWY")
 
 MANIFEST_FIELDS = [
     "stage5B_candidate_id",
-    "source_stage5A_candidate_id",
     "peptide_sequence_hash",
     "target_sequence_hash",
     "target_template_sha1",
@@ -45,7 +48,7 @@ MANIFEST_FIELDS = [
     "selection_order",
     "batch",
     "backbone_id",
-    "source_stage4_design_id",
+    *STAGE4_IDENTITY_FIELDS,
     "peptide_sequence",
     "peptide_length",
     "site_label",
@@ -94,6 +97,7 @@ JOB_FIELDS = [
     "protocol_hash",
     "batch",
     "backbone_id",
+    *STAGE4_IDENTITY_FIELDS,
     "seed",
     "target_sequence_length",
     "peptide_sequence",
@@ -110,6 +114,7 @@ JOB_FIELDS = [
     "peptide_msa_mode",
     "use_mlm",
     "use_dropout",
+    "models_per_seed",
     "requested_recycles",
     "forward_passes",
     "status",
@@ -366,7 +371,9 @@ These are validation inputs, not final peptide candidates.
 
 def main() -> int:
     parser = argparse.ArgumentParser(description="Prepare Stage 5B target-structure-conditioned AfCycDesign jobs.")
-    parser.add_argument("--stage5a-root", required=True)
+    parser.add_argument("--source-run-root", required=True)
+    parser.add_argument("--stage4-scores-csv", required=True)
+    parser.add_argument("--stage4-top-candidates-csv", required=True)
     parser.add_argument("--stage0-root", required=True)
     parser.add_argument("--output-root", required=True)
     parser.add_argument("--project-config", required=True)
@@ -379,38 +386,32 @@ def main() -> int:
     parser.add_argument("--colabdesign-source", default="$HOME/fga_model_envs/sources/ColabDesign-gamma-stage5")
     parser.add_argument("--python-overlay", default="$HOME/fga_model_envs/stage5_afcycdesign_python_overlay")
     parser.add_argument("--af-params", default="$HOME/fga_model_envs/af_params")
+    parser.add_argument(
+        "--validate-inputs-only",
+        action="store_true",
+        help="Validate the complete Stage 4 -> Stage 5B contract without writing jobs.",
+    )
     args = parser.parse_args()
 
     logger = setup_logger("30_prepare_stage5b_target_conditioned_jobs")
     append_run_header(logger, "30_prepare_stage5b_target_conditioned_jobs.py")
     if args.candidate_count != 5 or args.seeds_per_candidate != 5 or args.models_per_seed != 5:
-        raise RuntimeError("Stage 5B v1 is fixed at 5 candidates, 5 seeds, and 5 model parameter sets.")
+        raise RuntimeError("Stage 5B v2 is fixed at 5 candidates, 5 seeds, and 5 model parameter sets.")
     if args.recycles != 6 or args.expected_target_length != 86:
-        raise RuntimeError("Stage 5B v1 is fixed at 6 recycles and an 86-aa target template.")
+        raise RuntimeError("Stage 5B v2 is fixed at 6 recycles and an 86-aa target template.")
 
     project_root = resolve_path(".")
-    stage5a_root = _resolve_mixed_path(args.stage5a_root)
-    assert_active_route_path(stage5a_root, "Stage 30 Stage 5A root")
-    source_manifest_path, source_route_manifest, source_manifest_sha256 = load_route_manifest(stage5a_root)
-    validate_route_project_config(args.project_config, source_route_manifest)
-    source_stage5_protocol = source_route_manifest.get("stage5_protocol", {})
-    if not isinstance(source_stage5_protocol, dict) or source_stage5_protocol.get("protocol_version") != SOURCE_STAGE5A_PROTOCOL_VERSION:
-        raise RuntimeError("Stage 30 requires a Stage 5A-v2 source route manifest")
-    source_route_provenance = route_provenance_fields(
-        source_manifest_path,
-        source_route_manifest,
-        source_manifest_sha256,
+    stage4_contract = load_stage4_validation_contract(
+        source_run_root=args.source_run_root,
+        stage4_scores_csv=args.stage4_scores_csv,
+        stage4_top_candidates_csv=args.stage4_top_candidates_csv,
+        project_config=args.project_config,
+        candidate_count=args.candidate_count,
     )
-    stage5a_dir = stage5a_root / "07_structure_validation"
-    source_manifest = stage5a_dir / "FGA_rfpeptides_stage5_candidate_manifest.csv"
-    assert_active_route_path(source_manifest, "Stage 30 Stage 5A candidate manifest CSV")
-    source_rows = read_csv(source_manifest)
-    if len(source_rows) < args.candidate_count:
-        raise RuntimeError(f"Stage 5A-v2 manifest has {len(source_rows)} rows, expected at least 5: {source_manifest}")
-    source_rows = sorted(source_rows, key=lambda row: int(row.get("selection_order", 999999)))[: args.candidate_count]
-    for source_row in source_rows:
-        validate_row_route_provenance(source_row, source_route_provenance, "Stage 30 Stage 5A candidate row")
-        validate_source_route_provenance(source_row, "Stage 30 Stage 5A candidate row")
+    source_manifest_path = stage4_contract["source_route_manifest_path"]
+    source_route_manifest = stage4_contract["source_route_manifest"]
+    source_manifest_sha256 = stage4_contract["source_route_manifest_sha256"]
+    source_rows = list(stage4_contract["selected_rows"])
 
     output_root = _resolve_mixed_path(args.output_root)
     assert_active_route_path(output_root, "Stage 30 output root", must_exist=False)
@@ -431,9 +432,7 @@ def main() -> int:
     if not source_target.is_file():
         raise RuntimeError(f"Missing Stage 0 target template: {source_target}")
     target_template = target_dir / source_target.name
-    target_template.parent.mkdir(parents=True, exist_ok=True)
-    shutil.copy2(source_target, target_template)
-    target_sequence = _target_template_sequence(target_template, args.expected_target_length)
+    target_sequence = _target_template_sequence(source_target, args.expected_target_length)
     mapping_csv = stage0_dir / "RFpep_Site_2_crop_renumbering_mapping.csv"
     assert_active_route_path(mapping_csv, "Stage 30 Stage 0 mapping CSV")
     site2_indices, hotspot_indices, mapping_sequence = _load_mapping(
@@ -444,7 +443,38 @@ def main() -> int:
         raise RuntimeError("Stage 0 mapping sequence does not match target template chain A")
 
     target_sequence_hash = _sha1_text(target_sequence)[:8]
-    target_template_sha1 = _sha1_file(target_template)
+    target_template_sha1 = _sha1_file(source_target)
+
+    validated_sources: list[dict[str, Any]] = []
+    for order, source in enumerate(source_rows, start=1):
+        sequence = _validate_sequence(
+            source.get("peptide_sequence", ""),
+            f"Stage 4 candidate rank {order} peptide sequence",
+        )
+        recorded_length = int(source.get("peptide_length", len(sequence)))
+        if recorded_length != len(sequence):
+            raise RuntimeError(f"Stage 4 candidate rank {order} peptide length does not match its sequence")
+        source_design = _resolve_mixed_path(source.get("scored_pdb", ""))
+        assert_active_route_path(source_design, f"Stage 30 Stage 4 reference PDB rank {order}")
+        design_target, design_peptide = _pdb_context(source_design, args.expected_target_length)
+        if design_target != target_sequence or design_peptide != sequence:
+            raise RuntimeError(
+                f"Stage 4 candidate rank {order} PDB sequences do not match target/Stage 4 table sequences"
+            )
+        validated = dict(source)
+        validated["_validated_reference_pdb"] = source_design
+        validated["_validated_peptide_sequence"] = sequence
+        validated_sources.append(validated)
+    source_rows = validated_sources
+
+    if args.validate_inputs_only:
+        logger.info("Stage 4 -> Stage 5B contract validated: %s candidates", len(source_rows))
+        logger.info("Stage 4 run ID: %s", stage4_contract["stage4_run_id"])
+        logger.info("No Stage 5B files or predictions were written.")
+        return 0
+
+    target_template.parent.mkdir(parents=True, exist_ok=True)
+    shutil.copy2(source_target, target_template)
     protocol_payload = {
         "protocol_version": PROTOCOL_VERSION,
         "validation_test_type": "target_structure_conditioned_recovery",
@@ -467,12 +497,21 @@ def main() -> int:
         "cyclic_topology_encoding": "peptide_chain_relative_position_cyclic_offset",
         "models_per_seed": args.models_per_seed,
         "requested_recycles": args.recycles,
+        "stage4_run_id": stage4_contract["stage4_run_id"],
+        "stage4_protocol_identity_sha256": stage4_contract[
+            "stage4_protocol_identity_sha256"
+        ],
+        "stage4_run_group_id": stage4_contract["stage4_run_group_id"],
+        "stage4_scores_csv_sha256": stage4_contract["stage4_scores_csv_sha256"],
+        "stage4_top_candidates_csv_sha256": stage4_contract[
+            "stage4_top_candidates_csv_sha256"
+        ],
     }
     protocol_hash = _protocol_hash(protocol_payload)
     route_manifest_path, route_manifest, route_manifest_sha256 = write_route_manifest(
         output_root,
         {
-            "batch_id": f"stage5B_{source_route_manifest['batch_id']}",
+            "batch_id": f"stage5B_{stage4_contract['stage4_run_id']}_{protocol_hash}",
             "site_labels": list(source_route_manifest["site_labels"]),
             "protocol_peptide_length_min": int(source_route_manifest["protocol_peptide_length_min"]),
             "protocol_peptide_length_max": int(source_route_manifest["protocol_peptide_length_max"]),
@@ -492,6 +531,12 @@ def main() -> int:
                 }
             ],
             "stage5B_protocol": protocol_payload,
+            "stage4_scores_csv": str(stage4_contract["stage4_scores_csv"]),
+            "stage4_scores_csv_sha256": stage4_contract["stage4_scores_csv_sha256"],
+            "stage4_top_candidates_csv": str(stage4_contract["stage4_top_candidates_csv"]),
+            "stage4_top_candidates_csv_sha256": stage4_contract[
+                "stage4_top_candidates_csv_sha256"
+            ],
         },
     )
     route_provenance = route_provenance_fields(route_manifest_path, route_manifest, route_manifest_sha256)
@@ -506,22 +551,14 @@ def main() -> int:
     job_scripts: list[Path] = []
     representative_specs: list[Path] = []
     for order, source in enumerate(source_rows, start=1):
-        sequence = _validate_sequence(source.get("peptide_sequence", ""), f"candidate {order} peptide sequence")
-        recorded_length = int(source.get("peptide_length", len(sequence)))
-        if recorded_length != len(sequence):
-            raise RuntimeError(f"Candidate {order} manifest peptide length does not match its sequence")
-        source_design = _resolve_mixed_path(source.get("design_pdb", ""))
-        if not source_design.is_file():
-            source_design = _resolve_mixed_path(source.get("staged_design_pdb", ""))
-        if not source_design.is_file():
-            raise RuntimeError(f"Missing Stage 4 reference design PDB for candidate {order}")
-        assert_active_route_path(source_design, f"Stage 30 Stage 4 reference PDB for candidate {order}")
-        design_target, design_peptide = _pdb_context(source_design, args.expected_target_length)
-        if design_target != target_sequence or design_peptide != sequence:
-            raise RuntimeError(f"Candidate {order} Stage 4 PDB sequences do not match target/manifest sequences")
-
+        sequence = str(source["_validated_peptide_sequence"])
+        source_design = Path(source["_validated_reference_pdb"])
         peptide_hash = _sha1_text(sequence)[:8]
-        candidate_id = f"S5B_{order:02d}_{source['batch']}_{_safe_token(source['backbone_id'])}_seq{peptide_hash}"
+        global_backbone_hash = _sha1_text(str(source["global_backbone_id"]))[:10]
+        candidate_id = (
+            f"S5B2_{order:02d}_{source['batch']}_gb{global_backbone_hash}_"
+            f"seq{peptide_hash}_s4{str(source['stage4_protocol_identity_sha256'])[:8]}"
+        )
         staged_reference = reference_dir / f"{candidate_id}_stage4_reference.pdb"
         staged_reference.parent.mkdir(parents=True, exist_ok=True)
         shutil.copy2(source_design, staged_reference)
@@ -534,7 +571,6 @@ def main() -> int:
 
         row = {
             "stage5B_candidate_id": candidate_id,
-            "source_stage5A_candidate_id": source.get("stage5_candidate_id", ""),
             "peptide_sequence_hash": peptide_hash,
             "target_sequence_hash": target_sequence_hash,
             "target_template_sha1": target_template_sha1,
@@ -543,7 +579,7 @@ def main() -> int:
             "selection_order": order,
             "batch": source.get("batch", ""),
             "backbone_id": source.get("backbone_id", ""),
-            "source_stage4_design_id": source.get("source_stage4_design_id", ""),
+            **stage4_identity_values(source),
             "peptide_sequence": sequence,
             "peptide_length": len(sequence),
             "site_label": source.get("site_label", ""),
@@ -598,6 +634,7 @@ def main() -> int:
                 "validation_test_type": "target_structure_conditioned_recovery",
                 "batch": source.get("batch", ""),
                 "backbone_id": source.get("backbone_id", ""),
+                **stage4_identity_values(source),
                 "target_sequence": target_sequence,
                 "target_sequence_length": len(target_sequence),
                 "target_sequence_hash": target_sequence_hash,
@@ -668,6 +705,7 @@ def main() -> int:
                     "protocol_hash": protocol_hash,
                     "batch": source.get("batch", ""),
                     "backbone_id": source.get("backbone_id", ""),
+                    **stage4_identity_values(source),
                     "seed": seed,
                     "target_sequence_length": len(target_sequence),
                     "peptide_sequence": sequence,
@@ -684,6 +722,7 @@ def main() -> int:
                     "peptide_msa_mode": "single_sequence",
                     "use_mlm": "false",
                     "use_dropout": "true",
+                    "models_per_seed": args.models_per_seed,
                     "requested_recycles": args.recycles,
                     "forward_passes": args.recycles + 1,
                     "status": "prepared_not_run",
