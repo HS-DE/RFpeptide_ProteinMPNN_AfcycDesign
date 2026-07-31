@@ -1,6 +1,6 @@
 # FGA 环肽路线脚本人工检查包
 
-快照日期：2026-07-30
+快照日期：2026-07-31
 
 这个目录用于人工复核，不是新的运行目录。请先阅读本文件，再查看
 `脚本逐项清单.csv` 和 `SHA256SUMS.csv`。
@@ -63,7 +63,7 @@ Stage 20-31 现在只接受完整的活跃配置：
 | `22_prepare_proteinmpnn_jobs.py` | Stage 3A | 读取 Stage 2.5 selected table，以 `global_backbone_id` 为唯一主键准备 ProteinMPNN-only 或 ProteinMPNN-FastRelax jobs |
 | `23_collect_proteinmpnn_sequences.py` | Stage 3C | 以 Stage 22 jobs 表和 `global_backbone_id` 为唯一契约，精确收集完整 ProteinMPNN 输出集，再检查序列、Site_2/hotspot、宏环和 clash |
 | `24_stage3d1_sidechain_repack.py` | Stage 3D-1 | 仅承接完整 ProteinMPNN-only run group，以 `global_backbone_id` 关联并做 PyRosetta side-chain repack-only；用写出前后 N/CA/C/O 坐标硬验证 backbone 未移动 |
-| `25_stage4_rosetta_interface_scoring.py` | Stage 4A-v2 | no-repack/no-minimization Rosetta score proxy、序列性质和 validation priority |
+| `25_stage4_rosetta_interface_scoring.py` | Stage 4A-v2 | 严格承接完整 run-group Stage 3D-1 full/pass 表；只做 no-repack/no-minimization Rosetta score proxy、序列性质和 backbone-diverse validation priority |
 | `26_prepare_afcycdesign_jobs.py` | Stage 5A 准备 | 合并 Stage 4 候选并准备 sequence-based independent-recovery jobs |
 | `27_collect_afcycdesign_validation.py` | Stage 5A 收集 | 解析 independent-recovery 模型并计算位点、姿态、拓扑和置信度 |
 | `28_prepare_stage5_target_controls.py` | Stage 5 control | 准备 target-only single-sequence/MLM/MSA 控制 |
@@ -159,7 +159,7 @@ Stage 5A 和 Stage 5B 输出目录。它们保留原始绝对路径和旧参数�
 9. `21b/21c`：确认跨批次只使用 `global_backbone_id`，重复审计与 family/平衡筛选没有改变 Stage 2 pass 状态。
 10. `23_collect_proteinmpnn_sequences.py`：确认 Stage 3 继续使用每个结构自己的 mapped residue number。
 11. `24_stage3d1_sidechain_repack.py`：确认只读取完整 run-group Stage 3C 表、只用 `global_backbone_id` 关联，并以坐标位移证明 repack 没有移动 peptide/target backbone。
-12. `25_stage4_rosetta_interface_scoring.py`：确认不移动 backbone，分数不被描述为实验结合能。
+12. `25_stage4_rosetta_interface_scoring.py`：确认重新核验 312 jobs、2,496 Stage 3C、2,441 Stage 3D-1 full 和 2,372 pass 记录；只用 `global_backbone_id` 关联，不移动 backbone，并且分数不被描述为实验结合能。
 13. `26-31`：确认 Stage 5 identity/cache、template coverage、坐标对齐和 reference-site premise。
 
 ## 当前 smoke 状态
@@ -185,7 +185,7 @@ Stage 3，也不能据此直接扩大生产。
 `08_运行时分叉与修复证据/RFpep_Site_2_L17_17_0.pdb` 是较早 N1-v2
 runtime-fix 参考，不应替代 N1-v3 的完整端到端证据。
 
-## 2026-07-30 当前生产状态
+## 2026-07-31 当前生产状态
 
 修正路线已完成 6 批、每批 2,000 条 Stage 1 生成，并对全部 12,000 条执行
 严格 Stage 2；其中 1,937 条通过 provenance、Site_2/hotspot、宏环与 clash
@@ -217,5 +217,23 @@ Stage 3C QC 和结果写出前，必须同时通过 aggregate/source manifest、
 provenance、Stage 2.5 selection、源/输入 PDB 哈希、runlist 以及完整输出集
 校验。缺少、空文件或额外 PDB 都会硬失败，不允许部分收集。
 
-当前只完成了安全门槛验证，没有执行 ProteinMPNN：上游 312-job 契约通过，
-随后因 2,496 个 Stage 3B 输出尚不存在而按预期停止，Stage 3C 输出为 0。
+Stage 3B 已完整生成 2,496/2,496 个 ProteinMPNN-only PDB。Stage 3C
+直接通过 1,354 条，其余 1,142 条仅因 severe clash 失败；全部 2,496 条均
+保持有效序列、Site_2/hotspot 接触和 head-to-tail 宏环几何。
+
+Stage 3D-1 在同一 global backbone 内跳过 55 条重复序列，对 2,441 条唯一
+结构执行 fixed-backbone side-chain repack；2,372 条通过，69 条仍有 severe
+clash。Stage 25 已适配为严格承接该 run group，并通过真实 input-only
+preflight：
+
+```text
+312 Stage 3 jobs
+2496 complete Stage 3C rows
+2441 complete Stage 3D-1 rows
+2372 Stage 3D-1 pass rows selected for Stage 4
+PyRosetta loaded: false
+Stage 4 outputs written: 0
+```
+
+正式 Stage 4A-v2 尚未运行。当前 2,372 条只具备进入 score-only 排序层的
+资格，不是最终 peptide candidates。

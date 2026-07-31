@@ -2704,8 +2704,103 @@ The run-group-scoped Stage 3D-1 outputs will be written under:
 05_proteinmpnn_sequences/stage3d1/stage3_312bp_7426f7fdb327/
 ```
 
-Current status: Stage 24 code and input contract are ready, but Stage 3D-1 has
-not been run. The safety invocation stops before loading PyRosetta because
-Stage 3B and the complete Stage 3C table do not yet exist. Stage 4 must not be
-started until Stage 25 is adapted to this new run-group/global-ID Stage 3D-1
-output contract.
+Current completed Stage 3 result, 2026-07-30:
+
+```text
+Stage 3B expected/generated PDBs: 2496/2496
+Stage 3C direct pass: 1354/2496
+Stage 3C severe-clash-only failures: 1142
+Stage 3D-1 duplicate rows skipped within global backbone: 55
+Stage 3D-1 unique rows repacked: 2441
+Stage 3D-1 pass: 2372
+Stage 3D-1 remaining severe-clash failures: 69
+```
+
+All 2,496 Stage 3C rows passed sequence validity, Site_2 contact, hotspot
+contact, and head-to-tail macrocycle geometry. The only Stage 3C failure mode
+was severe clash. Stage 3D-1 retained fixed peptide and target backbone
+coordinates and removed the severe clash from all but 69 unique rows. Only the
+2,372 `pass_stage3d1_qc=true` rows may enter Stage 4.
+
+Stage 25 was adapted on 2026-07-31 to the active run-group/global-ID contract:
+
+- all production input paths are explicit required arguments;
+- the aggregate route manifest and six source manifests are revalidated;
+- all 312 Stage 3 jobs and all 2,496 Stage 3C rows are revalidated;
+- the full 2,441-row Stage 3D-1 table and its 2,372-row pass table must be exact
+  full/pass counterparts;
+- `global_backbone_id` is the only backbone join key;
+- Stage 3D-1 CSV paths/hashes, PDB paths/hashes, target sequence, peptide
+  sequence, peptide length, chain roles, and route provenance are checked
+  before PyRosetta is loaded;
+- score-only PDB copies must remain byte-identical to Stage 3D-1 inputs;
+- Stage 4 does not run FastRelax, repack, minimization, sequence design, or
+  backbone movement;
+- `ddg_proxy_no_repack` is reported in REU together with per-residue and
+  per-contact normalizations. It is not experimental binding energy;
+- Stage 4 outputs are isolated by both Stage 3 run group and Stage 4 protocol
+  identity;
+- the default top-five validation shortlist contains at most one sequence per
+  `global_backbone_id`. The complete score table still retains all rows.
+
+Stage 4A-v2 input-only preflight:
+
+```bash
+cd /mnt/c/SH/fga_cyclic_peptide_design
+source ~/fga_model_envs/miniforge3/etc/profile.d/conda.sh
+conda activate fga_stage1_fpocket
+
+python scripts/25_stage4_rosetta_interface_scoring.py \
+  --stage0-root results/rfpeptides_article_route_clean_20260615_fpocket \
+  --stage3-root results/rfpeptides_head_to_tail_v1_20260718_stage2_5_batches01_06 \
+  --project-config config/rfpeptides_head_to_tail.yaml \
+  --stage3-mode proteinmpnn_only \
+  --stage2-selection-csv results/rfpeptides_head_to_tail_v1_20260718_stage2_5_batches01_06/04_backbone_diversity/FGA_rfpeptides_stage2_5_selected_backbones.csv \
+  --stage3-jobs-csv results/rfpeptides_head_to_tail_v1_20260718_stage2_5_batches01_06/04_proteinmpnn_inputs/FGA_rfpeptides_stage3_312bp_7426f7fdb327_jobs.csv \
+  --stage3c-qc-csv results/rfpeptides_head_to_tail_v1_20260718_stage2_5_batches01_06/05_proteinmpnn_sequences/stage3c/stage3_312bp_7426f7fdb327/FGA_rfpeptides_stage3_312bp_7426f7fdb327_stage3C_sequences_qc.csv \
+  --stage3d1-qc-csv results/rfpeptides_head_to_tail_v1_20260718_stage2_5_batches01_06/05_proteinmpnn_sequences/stage3d1/stage3_312bp_7426f7fdb327/FGA_rfpeptides_stage3_312bp_7426f7fdb327_stage3D1_sidechain_repack_qc.csv \
+  --stage3d1-pass-csv results/rfpeptides_head_to_tail_v1_20260718_stage2_5_batches01_06/05_proteinmpnn_sequences/stage3d1/stage3_312bp_7426f7fdb327/FGA_rfpeptides_stage3_312bp_7426f7fdb327_stage3D1_sidechain_repack_qc_pass.csv \
+  --validate-inputs-only
+```
+
+The real preflight completed on 2026-07-31 with:
+
+```text
+Authoritative Stage 3 jobs validated: 312
+Complete Stage 3C rows validated: 2496
+Complete Stage 3D-1 QC rows validated: 2441
+Stage 3D-1 pass rows selected for Stage 4: 2372
+PyRosetta loaded: false
+Stage 4 outputs written: 0
+```
+
+Full Stage 4A-v2 score-only execution, to be run by the user:
+
+```bash
+cd /mnt/c/SH/fga_cyclic_peptide_design
+source ~/fga_model_envs/miniforge3/etc/profile.d/conda.sh
+conda activate proteinmpnn_binder_design
+
+python scripts/25_stage4_rosetta_interface_scoring.py \
+  --stage0-root results/rfpeptides_article_route_clean_20260615_fpocket \
+  --stage3-root results/rfpeptides_head_to_tail_v1_20260718_stage2_5_batches01_06 \
+  --project-config config/rfpeptides_head_to_tail.yaml \
+  --stage3-mode proteinmpnn_only \
+  --stage2-selection-csv results/rfpeptides_head_to_tail_v1_20260718_stage2_5_batches01_06/04_backbone_diversity/FGA_rfpeptides_stage2_5_selected_backbones.csv \
+  --stage3-jobs-csv results/rfpeptides_head_to_tail_v1_20260718_stage2_5_batches01_06/04_proteinmpnn_inputs/FGA_rfpeptides_stage3_312bp_7426f7fdb327_jobs.csv \
+  --stage3c-qc-csv results/rfpeptides_head_to_tail_v1_20260718_stage2_5_batches01_06/05_proteinmpnn_sequences/stage3c/stage3_312bp_7426f7fdb327/FGA_rfpeptides_stage3_312bp_7426f7fdb327_stage3C_sequences_qc.csv \
+  --stage3d1-qc-csv results/rfpeptides_head_to_tail_v1_20260718_stage2_5_batches01_06/05_proteinmpnn_sequences/stage3d1/stage3_312bp_7426f7fdb327/FGA_rfpeptides_stage3_312bp_7426f7fdb327_stage3D1_sidechain_repack_qc.csv \
+  --stage3d1-pass-csv results/rfpeptides_head_to_tail_v1_20260718_stage2_5_batches01_06/05_proteinmpnn_sequences/stage3d1/stage3_312bp_7426f7fdb327/FGA_rfpeptides_stage3_312bp_7426f7fdb327_stage3D1_sidechain_repack_qc_pass.csv
+```
+
+Stage 4A-v2 outputs will be isolated under:
+
+```text
+06_rosetta_scoring/
+  stage3_312bp_7426f7fdb327/
+    stage4A_v2_stage3_312bp_7426f7fdb327_<protocol-hash>/
+```
+
+Current status: Stage 25 code, tests, and real input-only preflight are ready.
+Formal Stage 4 scoring has not been run. Passing Stage 4 remains an
+intermediate ranking result, not a final peptide-candidate claim.
