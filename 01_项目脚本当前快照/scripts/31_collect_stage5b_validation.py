@@ -43,6 +43,8 @@ BACKBONE_ATOMS = ("N", "CA", "C")
 MODEL_FIELDS = [
     "stage5B_candidate_id",
     "stage5B_job_id",
+    "stage5_selection_mode",
+    "stage5_campaign_id",
     "protocol_hash",
     "batch",
     "backbone_id",
@@ -122,6 +124,8 @@ MODEL_FIELDS = [
 
 CANDIDATE_FIELDS = [
     "stage5B_candidate_id",
+    "stage5_selection_mode",
+    "stage5_campaign_id",
     "batch",
     "backbone_id",
     *STAGE4_IDENTITY_FIELDS,
@@ -387,6 +391,8 @@ def _protocol_identity_valid(
     identity_checks = []
     for field in [
         *STAGE4_IDENTITY_FIELDS,
+        "stage5_selection_mode",
+        "stage5_campaign_id",
         "peptide_sequence_hash",
         "protocol_hash",
     ]:
@@ -555,6 +561,8 @@ def _model_row(
     return {
         "stage5B_candidate_id": manifest["stage5B_candidate_id"],
         "stage5B_job_id": job["stage5B_job_id"],
+        "stage5_selection_mode": manifest.get("stage5_selection_mode", ""),
+        "stage5_campaign_id": manifest.get("stage5_campaign_id", ""),
         "protocol_hash": manifest["protocol_hash"],
         "batch": manifest["batch"],
         "backbone_id": manifest["backbone_id"],
@@ -712,6 +720,8 @@ def _candidate_summaries(
         summaries.append(
             {
                 "stage5B_candidate_id": candidate_id,
+                "stage5_selection_mode": manifest.get("stage5_selection_mode", ""),
+                "stage5_campaign_id": manifest.get("stage5_campaign_id", ""),
                 "batch": manifest.get("batch", ""),
                 "backbone_id": manifest.get("backbone_id", ""),
                 **stage4_identity_values(manifest),
@@ -759,6 +769,16 @@ def _report(
     args: argparse.Namespace,
     stage5b_dir: Path,
 ) -> str:
+    selection_modes = sorted(
+        {str(row.get("stage5_selection_mode", "")).strip() for row in candidates}
+        - {""}
+    )
+    campaign_ids = sorted(
+        {str(row.get("stage5_campaign_id", "")).strip() for row in candidates}
+        - {""}
+    )
+    selection_mode = ",".join(selection_modes) if selection_modes else "not_recorded_legacy_run"
+    campaign_id = ",".join(campaign_ids) if campaign_ids else "not_recorded_legacy_run"
     candidate_columns = [
         "stage5B_candidate_id", "backbone_id", "models_completed", "effective_unique_prediction_count",
         "reference_design_site2_contact_count", "reference_design_hotspot_contact_count",
@@ -795,6 +815,8 @@ zero.
 ```text
 seed_jobs_completed: {completed_jobs}/{expected_jobs}
 models_parsed: {len(models)}/{expected_models}
+stage5_selection_mode: {selection_mode}
+stage5_campaign_id: {campaign_id}
 target_template_input_verified: {template_verified}/{len(models)}
 peptide_template_coverage_zero: {peptide_zero}/{len(models)}
 candidates_with_strong_or_partial_support: {len(supported)}/{len(candidates)}
@@ -837,6 +859,11 @@ contacts Site_2 and a selected hotspot after mapping Stage 0 crop positions by
 target-chain order. A reference that fails this check is an upstream input
 premise failure and receives `stage5B_protocol_failure`; its predictions cannot
 be interpreted as a valid recovery test for the intended site.
+
+When `stage5_selection_mode=all_stage4_pass`, the run is interpreted as a
+broad sequence-conditioned rare-recovery screen. It does not by itself prove
+that the target-conditioning protocol is generally reliable or that a
+recovered peptide binds experimentally.
 
 ## Candidate Summary
 
@@ -932,6 +959,8 @@ def main() -> int:
                 metrics = list(csv.DictReader(handle))
             for field in [
                 *STAGE4_IDENTITY_FIELDS,
+                "stage5_selection_mode",
+                "stage5_campaign_id",
                 "stage5B_job_id",
                 "stage5B_candidate_id",
                 "peptide_sequence_hash",
@@ -987,6 +1016,8 @@ def main() -> int:
                 for field in (
                     "stage5B_job_id",
                     "stage5B_candidate_id",
+                    "stage5_selection_mode",
+                    "stage5_campaign_id",
                     "peptide_sequence_hash",
                     "protocol_hash",
                     "target_template_sha1",

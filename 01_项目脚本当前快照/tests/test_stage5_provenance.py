@@ -40,6 +40,8 @@ def _identity_row(candidate_id: str = "candidate_1") -> dict[str, str]:
     row = {
         "stage5_candidate_id": candidate_id,
         "stage5B_candidate_id": candidate_id,
+        "stage5_selection_mode": "all_stage4_pass",
+        "stage5_campaign_id": "campaign_1",
         "peptide_sequence_hash": "seqhash1",
         "protocol_hash": "protocol1",
     }
@@ -82,6 +84,44 @@ class Stage5ProvenanceTests(unittest.TestCase):
                 job_candidate_id_field="stage5_candidate_id",
                 label="test job",
             )
+
+    def test_stage5_campaign_identity_must_match_candidate(self) -> None:
+        candidate = _identity_row()
+        job = dict(candidate)
+        job["stage5_campaign_id"] = "wrong_campaign"
+        with self.assertRaisesRegex(RuntimeError, "stage5_campaign_id"):
+            contract.validate_stage5_identity_link(
+                candidate=candidate,
+                job=job,
+                candidate_id_field="stage5B_candidate_id",
+                job_candidate_id_field="stage5B_candidate_id",
+                label="test Stage 5B job",
+            )
+
+    def test_stage5b_all_pass_campaign_controls_are_present(self) -> None:
+        self.assertEqual(
+            contract.STAGE5_SELECTION_MODES,
+            {"top_validation", "all_stage4_pass"},
+        )
+        self.assertIn("stage5_selection_mode", stage5b_prep.MANIFEST_FIELDS)
+        self.assertIn("stage5_campaign_id", stage5b_prep.JOB_FIELDS)
+        self.assertIn("stage5_selection_mode", stage5b_runner.METRIC_FIELDS)
+        self.assertIn("stage5_campaign_id", stage5b_collect.CANDIDATE_FIELDS)
+        prep_text = (SCRIPTS / "30_prepare_stage5b_target_conditioned_jobs.py").read_text(
+            encoding="utf-8"
+        )
+        self.assertIn("--allow-large-campaign", prep_text)
+        self.assertIn("--job-shards", prep_text)
+        self.assertIn("S5B2ALL", prep_text)
+
+    def test_all_stage4_pass_selection_filters_fail_rows_without_requiring_contiguous_ranks(self) -> None:
+        rows = [
+            {"stage4_design_id": "fail_2", "stage4_priority_rank": "2", "pass_stage4_qc": "false"},
+            {"stage4_design_id": "pass_3", "stage4_priority_rank": "3", "pass_stage4_qc": "true"},
+            {"stage4_design_id": "pass_1", "stage4_priority_rank": "1", "pass_stage4_qc": "true"},
+        ]
+        selected = contract._stage4_pass_rows_by_priority(rows)
+        self.assertEqual([row["stage4_design_id"] for row in selected], ["pass_1", "pass_3"])
 
     def test_stage4_hard_gate_rejects_clash(self) -> None:
         row = {

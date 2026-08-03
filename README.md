@@ -69,8 +69,8 @@ Stage 20-31 现在只接受完整的活跃配置：
 | `27_collect_afcycdesign_validation.py` | Stage 5A 收集 | 按 candidate/job/spec/runtime identity 精确解析 independent-recovery 模型并计算位点、姿态、拓扑和置信度 |
 | `28_prepare_stage5_target_controls.py` | Stage 5 control | 准备 target-only single-sequence/MLM/MSA 控制 |
 | `29_collect_stage5_target_controls.py` | Stage 5 control | 收集 target-only recovery control |
-| `30_prepare_stage5b_target_conditioned_jobs.py` | Stage 5B 准备 | 严格读取同一 Stage 4 run 的完整表和正式 top 5，准备 target-only-template conditioned recovery；不提供 peptide template/initial guess |
-| `31_collect_stage5b_validation.py` | Stage 5B 收集 | 按 candidate/job/spec/runtime identity 精确解析 Stage 5B、统一坐标系并核验 Stage 4 reference 是否真实命中修正后的 Site_2 |
+| `30_prepare_stage5b_target_conditioned_jobs.py` | Stage 5B 准备 | 可选择正式 top 5 或全部 Stage 4 hard-QC pass；以 Stage 4 design + sequence hash 建立候选身份，支持分片准备 target-only-template conditioned recovery；不提供 peptide template/initial guess |
+| `31_collect_stage5b_validation.py` | Stage 5B 收集 | 按 campaign/candidate/job/spec/runtime identity 精确解析 Stage 5B、统一坐标系并核验 Stage 4 reference 是否真实命中修正后的 Site_2 |
 
 ## Stage 5 外部 runner
 
@@ -242,8 +242,8 @@ Stage 5A-v3 和 Stage 5B-v2 已适配当前 aggregate route、global backbone
 正式 top 5，并把序列、Stage 4 protocol、PDB SHA-256 和 route provenance
 纳入 candidate/job/cache identity。
 
-Stage 5A 和 Stage 5B 各已准备 5 candidates × 5 seeds = 25 个 gated jobs；
-静态 preflight 和 collector input-only validation 均通过，尚未运行任何模型
-预测。Stage 5B 是建议优先运行的 target-structure-conditioned recovery；
-Stage 5A sequence-only independent recovery 保留为探索性对照。二者的结果
-都仍属于结构验证证据，不是 final peptide candidates。
+Stage 5B top 5 已完成 25/25 jobs、125/125 models，但 5 条均未获得可重复
+的 target/Site_2/hotspot pose recovery。当前新增 `all_stage4_pass` 探索模式：
+全量输入契约已只读验证 2372/2372，通过后可准备 11860 seed jobs、59300
+models，并分成 6 个可断点重跑的 shard。该全量任务只用于搜索稀有恢复信号，
+不证明协议整体可靠，也不是 final peptide candidates。

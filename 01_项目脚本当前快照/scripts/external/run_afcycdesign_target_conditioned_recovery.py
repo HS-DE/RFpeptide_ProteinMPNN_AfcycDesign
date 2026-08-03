@@ -59,6 +59,8 @@ CACHE_IDENTITY_FIELDS = (
 METRIC_FIELDS = [
     "stage5B_job_id",
     "stage5B_candidate_id",
+    "stage5_selection_mode",
+    "stage5_campaign_id",
     "protocol_hash",
     "peptide_sequence_hash",
     "target_template_sha1",
@@ -578,6 +580,8 @@ def _run_prediction(spec: Mapping[str, Any], af_params: Path) -> None:
             {
                 "stage5B_job_id": spec["stage5B_job_id"],
                 "stage5B_candidate_id": spec["stage5B_candidate_id"],
+                "stage5_selection_mode": spec.get("stage5_selection_mode", ""),
+                "stage5_campaign_id": spec.get("stage5_campaign_id", ""),
                 "protocol_hash": spec["protocol_hash"],
                 "peptide_sequence_hash": spec["peptide_sequence_hash"],
                 "target_template_sha1": spec["target_template_sha1"],

@@ -2930,3 +2930,104 @@ cd /mnt/c/SH/fga_cyclic_peptide_design
 Do not run Stage 5A and Stage 5B concurrently on the same GPU. Stage 5
 predictions and their recovery counts must be reviewed before any peptide is
 described as a validated or final candidate.
+
+## Stage 5B all-Stage-4-pass broad scan, 2026-08-03
+
+The top-five Stage 5B run completed 25/25 seed jobs and 125/125 model
+predictions. Protocol identity, target-only template input, zero peptide
+template coverage, and cyclic geometry checks passed, but none of the five
+candidates produced a replicated target/Site_2/hotspot pose recovery. This
+does not prove that every Stage 4 sequence fails; it does show that Stage 5B
+must not be treated as a generally reliable binder-validation assay from the
+top-five run alone.
+
+The target-only diagnostic control is deferred. The next campaign is instead
+defined as an exploratory, sequence-conditioned search for rare recoveries
+over every Stage 4 hard-QC pass row. Its interpretation remains narrower than
+experimental binding validation.
+
+The Stage 4 complete table contains:
+
+```text
+Stage 4 hard-QC pass candidates: 2372/2372
+unique global backbones: 307
+unique backbone families: 307
+unique peptide sequences: 2372
+seeds per candidate: 5
+AlphaFold model parameter sets per seed: 5
+planned seed jobs: 11860
+planned model predictions: 59300
+job shards: 6
+```
+
+Stage 5B candidate identity is the Stage 4 design plus peptide sequence hash;
+multiple sequences on one global backbone are therefore retained rather than
+incorrectly collapsed. Candidate/job/spec/runtime records also carry
+`stage5_selection_mode=all_stage4_pass` and a campaign ID. Existing top-five
+outputs remain separate and cannot satisfy the new protocol/cache identity.
+
+Read-only full-contract validation completed successfully on 2026-08-03:
+
+```text
+Stage 4 -> Stage 5B contract validated: 2372 candidates
+Stage 5B seed jobs planned: 11860
+Stage 5B model predictions planned: 59300
+No Stage 5B files or predictions were written.
+```
+
+Prepare the full campaign only after reviewing the above scale:
+
+```bash
+cd /mnt/c/SH/fga_cyclic_peptide_design
+source ~/fga_model_envs/miniforge3/etc/profile.d/conda.sh
+conda activate fga_stage1_fpocket
+
+python scripts/30_prepare_stage5b_target_conditioned_jobs.py \
+  --source-run-root results/rfpeptides_head_to_tail_v1_20260718_stage2_5_batches01_06 \
+  --stage4-scores-csv results/rfpeptides_head_to_tail_v1_20260718_stage2_5_batches01_06/06_rosetta_scoring/stage3_312bp_7426f7fdb327/stage4A_v2_stage3_312bp_7426f7fdb327_364531706c6c/FGA_rfpeptides_stage4A_v2_stage3_312bp_7426f7fdb327_364531706c6c_rosetta_interface_scores.csv \
+  --stage4-top-candidates-csv results/rfpeptides_head_to_tail_v1_20260718_stage2_5_batches01_06/06_rosetta_scoring/stage3_312bp_7426f7fdb327/stage4A_v2_stage3_312bp_7426f7fdb327_364531706c6c/FGA_rfpeptides_stage4A_v2_stage3_312bp_7426f7fdb327_364531706c6c_top_validation_candidates.csv \
+  --stage0-root results/rfpeptides_article_route_clean_20260615_fpocket \
+  --output-root results/rfpeptides_head_to_tail_v1_20260803_stage5B_all2372 \
+  --project-config config/rfpeptides_head_to_tail.yaml \
+  --selection-mode all_stage4_pass \
+  --job-shards 6 \
+  --allow-large-campaign
+```
+
+Run the generated static preflight before starting any shard:
+
+```bash
+bash results/rfpeptides_head_to_tail_v1_20260803_stage5B_all2372/07_structure_validation_target_conditioned/jobs/check_stage5B_target_conditioned_protocol.sh
+```
+
+Run at most one shard per GPU at a time. For example, start shards 1 and 2,
+then 3 and 4, then 5 and 6 after the preceding pair finishes:
+
+```bash
+CUDA_VISIBLE_DEVICES=0 RUN_STAGE5B_PREDICTIONS=YES bash \
+  results/rfpeptides_head_to_tail_v1_20260803_stage5B_all2372/07_structure_validation_target_conditioned/jobs/run_stage5B_target_conditioned_recovery_shard_01_of_06.sh
+
+CUDA_VISIBLE_DEVICES=1 RUN_STAGE5B_PREDICTIONS=YES bash \
+  results/rfpeptides_head_to_tail_v1_20260803_stage5B_all2372/07_structure_validation_target_conditioned/jobs/run_stage5B_target_conditioned_recovery_shard_02_of_06.sh
+```
+
+The same shard command is restartable: cache-valid completed jobs are skipped
+only after the complete job/protocol/template/sequence identity is rechecked.
+
+After all six shards finish, collect the complete matrix:
+
+```bash
+cd /mnt/c/SH/fga_cyclic_peptide_design
+
+~/fga_model_envs/colabdesign-py310/.pixi/envs/default/bin/python \
+  scripts/31_collect_stage5b_validation.py \
+  --stage5b-root results/rfpeptides_head_to_tail_v1_20260803_stage5B_all2372/07_structure_validation_target_conditioned \
+  --candidate-manifest-csv results/rfpeptides_head_to_tail_v1_20260803_stage5B_all2372/07_structure_validation_target_conditioned/FGA_rfpeptides_stage5B_candidate_manifest.csv \
+  --jobs-csv results/rfpeptides_head_to_tail_v1_20260803_stage5B_all2372/07_structure_validation_target_conditioned/FGA_rfpeptides_stage5B_prediction_jobs.csv \
+  --stage0-root results/rfpeptides_article_route_clean_20260615_fpocket \
+  --project-config config/rfpeptides_head_to_tail.yaml
+```
+
+This campaign is not a final peptide selection. Any apparent recovery must
+still pass target recovery, Site_2/hotspot contact, macrocycle, clash,
+confidence, seed-diversity, and replication checks before it is promoted.

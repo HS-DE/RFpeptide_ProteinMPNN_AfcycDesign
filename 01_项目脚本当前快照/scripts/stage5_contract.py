@@ -3,7 +3,7 @@ from __future__ import annotations
 import json
 import os
 from pathlib import Path
-from typing import Any, Iterable, Mapping
+from typing import Any, Iterable, Mapping, Sequence
 
 from common import (
     ROUTE_PROVENANCE_FIELDS,
@@ -34,6 +34,8 @@ STAGE4_IDENTITY_FIELDS = [
     "stage4_top_candidates_csv_sha256",
     "stage4_validation_selection_rank",
 ]
+
+STAGE5_SELECTION_MODES = {"top_validation", "all_stage4_pass"}
 
 STAGE4_FULL_REQUIRED_FIELDS = {
     "stage4_design_id",
@@ -247,6 +249,32 @@ def _top_full_compare_fields() -> tuple[tuple[str, str], ...]:
     )
 
 
+def _stage4_pass_rows_by_priority(
+    score_rows: Sequence[Mapping[str, str]],
+) -> list[Mapping[str, str]]:
+    passing_rows = [
+        row
+        for row in score_rows
+        if str(row.get("pass_stage4_qc", "")).strip().lower() == "true"
+    ]
+    if not passing_rows:
+        raise RuntimeError("Stage 4 complete score table has no hard-QC pass rows")
+    try:
+        ranked_rows = sorted(
+            passing_rows,
+            key=lambda row: (
+                int(str(row["stage4_priority_rank"])),
+                str(row["stage4_design_id"]),
+            ),
+        )
+        observed_ranks = [int(str(row["stage4_priority_rank"])) for row in ranked_rows]
+    except ValueError as exc:
+        raise RuntimeError("Stage 4 complete score table has a non-integer priority rank") from exc
+    if any(rank < 1 for rank in observed_ranks) or len(set(observed_ranks)) != len(observed_ranks):
+        raise RuntimeError("Stage 4 pass rows must have unique positive stage4_priority_rank values")
+    return ranked_rows
+
+
 def load_stage4_validation_contract(
     *,
     source_run_root: str | Path,
@@ -254,9 +282,15 @@ def load_stage4_validation_contract(
     stage4_top_candidates_csv: str | Path,
     project_config: str | Path,
     candidate_count: int,
+    selection_mode: str = "top_validation",
 ) -> dict[str, Any]:
     if candidate_count < 1:
         raise RuntimeError("candidate_count must be positive")
+    if selection_mode not in STAGE5_SELECTION_MODES:
+        raise RuntimeError(
+            f"Unsupported Stage 5 selection mode {selection_mode!r}; "
+            f"expected one of {sorted(STAGE5_SELECTION_MODES)}"
+        )
 
     source_root = assert_active_route_path(
         resolve_mixed_path(source_run_root),
@@ -322,7 +356,7 @@ def load_stage4_validation_contract(
         )
     selected_global_ids: set[str] = set()
     selected_family_ids: set[str] = set()
-    selected_rows: list[dict[str, Any]] = []
+    top_selected_rows: list[dict[str, Any]] = []
     scores_sha256 = sha256_file(scores_csv)
     top_sha256 = sha256_file(top_csv)
     for rank, top_row in enumerate(top_rows, start=1):
@@ -366,7 +400,52 @@ def load_stage4_validation_contract(
                 "stage4_top_candidates_csv_sha256": top_sha256,
             }
         )
-        selected_rows.append(selected)
+        top_selected_rows.append(selected)
+
+    if selection_mode == "top_validation":
+        selected_rows = top_selected_rows
+    else:
+        ranked_rows = _stage4_pass_rows_by_priority(score_rows)
+
+        selected_rows = []
+        selected_sequence_keys: set[tuple[str, str]] = set()
+        for rank, full_row in enumerate(ranked_rows, start=1):
+            design_id = str(full_row["stage4_design_id"]).strip()
+            label = f"Stage 4 all-pass candidate rank {rank} ({design_id})"
+            _validate_stage4_hard_gate(full_row, label)
+            scored_pdb = _validate_stage4_pdb(full_row, label)
+            global_id = str(full_row["global_backbone_id"]).strip()
+            family_id = str(full_row["backbone_family_id"]).strip()
+            peptide_sequence = str(full_row["peptide_sequence"]).strip().upper()
+            if not global_id or not family_id or not peptide_sequence:
+                raise RuntimeError(f"{label} has incomplete backbone/sequence identity")
+            sequence_key = (global_id, peptide_sequence)
+            if sequence_key in selected_sequence_keys:
+                raise RuntimeError(
+                    f"Stage 4 all-pass table repeats a sequence within global backbone {global_id}"
+                )
+            selected_sequence_keys.add(sequence_key)
+
+            selected = dict(full_row)
+            selected["scored_pdb"] = str(scored_pdb)
+            selected["selection_reason"] = (
+                "all_stage4_pass_campaign;"
+                f"stage4_priority_rank={full_row['stage4_priority_rank']}"
+            )
+            selected["batch"] = str(full_row["source_batch_label"]).strip()
+            selected["backbone_id"] = global_id
+            selected.update(
+                {
+                    "source_stage4_design_id": design_id,
+                    "source_stage4_scored_pdb_sha256": str(full_row["scored_pdb_sha256"]).strip(),
+                    "stage4_run_group_id": run_group_id,
+                    "stage4_scores_csv": str(scores_csv),
+                    "stage4_scores_csv_sha256": scores_sha256,
+                    "stage4_top_candidates_csv": str(top_csv),
+                    "stage4_top_candidates_csv_sha256": top_sha256,
+                }
+            )
+            selected_rows.append(selected)
 
     return {
         "source_root": source_root,
@@ -381,6 +460,7 @@ def load_stage4_validation_contract(
         "stage4_run_id": stage4_run_id,
         "stage4_protocol_identity_sha256": protocol_identity,
         "stage4_run_group_id": run_group_id,
+        "selection_mode": selection_mode,
         "selected_rows": selected_rows,
     }
 
@@ -403,6 +483,8 @@ def validate_stage5_identity_link(
         f"{label} candidate ID",
     )
     fields = [
+        "stage5_selection_mode",
+        "stage5_campaign_id",
         "global_backbone_id",
         "backbone_family_id",
         "source_batch_label",
@@ -486,7 +568,7 @@ def load_prepared_stage5_contract(
     )
 
     candidate_lookup: dict[str, dict[str, str]] = {}
-    global_ids: set[str] = set()
+    candidate_sequence_keys: set[tuple[str, str]] = set()
     stage4_design_ids: set[str] = set()
     for candidate in candidates:
         candidate_id = str(candidate.get(candidate_id_field, "")).strip()
@@ -494,8 +576,17 @@ def load_prepared_stage5_contract(
             raise RuntimeError(f"Stage 5 candidate manifest has duplicate/empty ID: {candidate_id!r}")
         global_id = str(candidate.get("global_backbone_id", "")).strip()
         stage4_design_id = str(candidate.get("source_stage4_design_id", "")).strip()
-        if not global_id or global_id in global_ids:
-            raise RuntimeError(f"Stage 5 candidate manifest has duplicate/empty global_backbone_id: {global_id!r}")
+        peptide_sequence_hash = str(candidate.get("peptide_sequence_hash", "")).strip()
+        if not global_id or not peptide_sequence_hash:
+            raise RuntimeError(
+                f"Stage 5 candidate manifest has incomplete backbone/sequence identity: {candidate_id}"
+            )
+        sequence_key = (global_id, peptide_sequence_hash)
+        if sequence_key in candidate_sequence_keys:
+            raise RuntimeError(
+                "Stage 5 candidate manifest repeats the same sequence hash within global backbone: "
+                f"{global_id}/{peptide_sequence_hash}"
+            )
         if not stage4_design_id or stage4_design_id in stage4_design_ids:
             raise RuntimeError(
                 f"Stage 5 candidate manifest has duplicate/empty source_stage4_design_id: {stage4_design_id!r}"
@@ -528,7 +619,7 @@ def load_prepared_stage5_contract(
                 f"Stage 5 candidate {candidate_id} {sha_field}",
             )
         candidate_lookup[candidate_id] = candidate
-        global_ids.add(global_id)
+        candidate_sequence_keys.add(sequence_key)
         stage4_design_ids.add(stage4_design_id)
 
     job_lookup: dict[str, dict[str, str]] = {}
