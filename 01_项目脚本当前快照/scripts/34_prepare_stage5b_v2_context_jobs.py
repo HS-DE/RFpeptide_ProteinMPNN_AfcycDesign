@@ -36,7 +36,9 @@ from stage5_contract import (
 
 
 COLABDESIGN_GAMMA_COMMIT = "5ab4efaba2321a6c3c314b82d2fff8e0241f5c2d"
-PROTOCOL_VERSION = "stage5B_v2_C1_C3_full_target_template_top5_v1"
+TOP5_PROTOCOL_VERSION = "stage5B_v2_C1_C3_full_target_template_top5_v1"
+ALL_PASS_PROTOCOL_VERSION = "stage5B_v2_C1_C3_full_target_template_allpass_v1"
+PROTOCOL_VERSION = TOP5_PROTOCOL_VERSION
 VALIDATION_TEST_TYPE = "target_context_structure_conditioned_recovery"
 MODEL_NAMES = [f"model_{index}_multimer_v3" for index in range(1, 6)]
 LEGAL_AA = set("ACDEFGHIKLMNPQRSTVWY")
@@ -91,6 +93,7 @@ MANIFEST_FIELDS = [
     "models_per_seed",
     "protocol_hash",
     "stage5_campaign_id",
+    "stage5_selection_mode",
     "status",
     "notes",
     *SOURCE_ROUTE_PROVENANCE_FIELDS,
@@ -105,6 +108,8 @@ JOB_FIELDS = [
     "peptide_sequence_hash",
     "protocol_hash",
     "stage5_campaign_id",
+    "stage5_selection_mode",
+    "job_shard",
     "seed",
     "requested_recycles",
     "forward_passes",
@@ -342,14 +347,22 @@ bash {shlex.quote(_to_wsl_path(preflight))}
 '''
 
 
-def _plan_markdown(rows: list[Mapping[str, Any]], output_dir: Path) -> str:
+def _plan_markdown(
+    rows: list[Mapping[str, Any]],
+    output_dir: Path,
+    selection_mode: str,
+    seed_jobs: int,
+    model_predictions: int,
+    job_shards: int,
+    representative_preflights: int,
+) -> str:
     candidates = sorted({str(row["stage5B_v2_candidate_id"]) for row in rows})
     contexts = sorted({str(row["context_id"]) for row in rows})
-    return f"""# Stage 5B-v2 C1/C3 Top-5 Recovery Plan
+    return f"""# Stage 5B-v2 C1/C3 Recovery Plan
 
-This campaign compares the same five corrected-route Stage 4 candidates under
-two full target-template contexts: C1 (the 86-aa crop) and C3 (the native
-G/H/I 301-aa context).
+This campaign compares corrected-route Stage 4 candidates under two full
+target-template contexts: C1 (the 86-aa crop) and C3 (the native G/H/I 301-aa
+context).
 
 Protocol invariants:
 
@@ -366,8 +379,13 @@ Planned matrix:
 
 ```text
 candidates: {len(candidates)}
+selection_mode: {selection_mode}
 contexts: {', '.join(contexts)}
 candidate_context_pairs: {len(rows)}
+seed_jobs: {seed_jobs}
+model_predictions: {model_predictions}
+job_shards: {job_shards}
+representative_preflights: {representative_preflights}
 output_directory: {output_dir}
 ```
 
@@ -378,7 +396,7 @@ candidate. Prediction scripts remain gated by `RUN_STAGE5B_V2_PREDICTIONS=YES`.
 
 
 def main() -> int:
-    parser = argparse.ArgumentParser(description="Prepare Stage 5B-v2 top-5 peptide recovery in C1 and C3 contexts.")
+    parser = argparse.ArgumentParser(description="Prepare Stage 5B-v2 peptide recovery in C1 and C3 contexts.")
     parser.add_argument("--source-run-root", required=True)
     parser.add_argument("--stage4-scores-csv", required=True)
     parser.add_argument("--stage4-top-candidates-csv", required=True)
@@ -386,10 +404,22 @@ def main() -> int:
     parser.add_argument("--output-root", required=True)
     parser.add_argument("--project-config", required=True)
     parser.add_argument("--context-ids", default=",".join(DEFAULT_CONTEXT_IDS))
+    parser.add_argument(
+        "--selection-mode",
+        choices=["top_validation", "all_stage4_pass"],
+        default="top_validation",
+        help="Use the exact Stage 4 top table or every row that passes the Stage 4 hard gates.",
+    )
     parser.add_argument("--candidate-count", type=int, default=5)
     parser.add_argument("--seeds-per-candidate-context", type=int, default=1)
     parser.add_argument("--models-per-seed", type=int, default=5)
     parser.add_argument("--recycles", type=int, default=6)
+    parser.add_argument("--job-shards", type=int, default=1)
+    parser.add_argument(
+        "--allow-large-campaign",
+        action="store_true",
+        help="Required to write an all_stage4_pass campaign. Validation-only does not require it.",
+    )
     parser.add_argument("--validate-inputs-only", action="store_true")
     parser.add_argument(
         "--afcycdesign-python",
@@ -412,11 +442,17 @@ def main() -> int:
     if selected_contexts != list(DEFAULT_CONTEXT_IDS):
         raise RuntimeError(f"This protocol is fixed to ordered contexts {DEFAULT_CONTEXT_IDS}")
     if args.candidate_count != 5:
-        raise RuntimeError("Stage 5B-v2 C1/C3 is fixed to the official Stage 4 top 5")
+        raise RuntimeError("--candidate-count is the fixed five-row Stage 4 audit top table size")
     if args.seeds_per_candidate_context < 1:
         raise RuntimeError("--seeds-per-candidate-context must be positive")
     if args.models_per_seed != 5 or args.recycles != 6:
         raise RuntimeError("Stage 5B-v2 requires five model sets and six requested recycles")
+    if args.job_shards < 1:
+        raise RuntimeError("--job-shards must be >= 1")
+    if args.selection_mode == "all_stage4_pass" and not args.validate_inputs_only and not args.allow_large_campaign:
+        raise RuntimeError(
+            "Writing an all_stage4_pass C1/C3 campaign requires --allow-large-campaign after reviewing its size."
+        )
 
     stage4 = load_stage4_validation_contract(
         source_run_root=args.source_run_root,
@@ -424,12 +460,14 @@ def main() -> int:
         stage4_top_candidates_csv=args.stage4_top_candidates_csv,
         project_config=args.project_config,
         candidate_count=5,
-        selection_mode="top_validation",
+        selection_mode=args.selection_mode,
     )
     source_manifest = stage4["source_route_manifest"]
     source_manifest_path = stage4["source_route_manifest_path"]
     source_manifest_sha256 = stage4["source_route_manifest_sha256"]
     source_rows = list(stage4["selected_rows"])
+    if args.job_shards > len(source_rows) * len(selected_contexts) * args.seeds_per_candidate_context:
+        raise RuntimeError("--job-shards cannot exceed the planned seed-job count")
 
     context_root = assert_active_route_path(
         _resolve_mixed_path(args.context_control_root), "Stage 34 context-control root"
@@ -472,18 +510,18 @@ def main() -> int:
 
     validated_sources: list[dict[str, Any]] = []
     for order, source in enumerate(source_rows, start=1):
-        peptide = _validate_sequence(source["peptide_sequence"], f"Stage 4 top candidate {order}")
+        peptide = _validate_sequence(source["peptide_sequence"], f"Stage 4 candidate {order}")
         if int(source["peptide_length"]) != len(peptide):
-            raise RuntimeError(f"Stage 4 top candidate {order} peptide length mismatch")
+            raise RuntimeError(f"Stage 4 candidate {order} peptide length mismatch")
         reference = assert_active_route_path(
             _resolve_mixed_path(source["scored_pdb"]), f"Stage 34 Stage 4 reference {order}"
         )
         if sha256_file(reference) != str(source["scored_pdb_sha256"]):
-            raise RuntimeError(f"Stage 4 top candidate {order} reference SHA-256 mismatch")
+            raise RuntimeError(f"Stage 4 candidate {order} reference SHA-256 mismatch")
         target_chain = str(source.get("target_chain", "")).strip()
         peptide_chain = str(source.get("peptide_chain", "")).strip()
         if not target_chain or not peptide_chain:
-            raise RuntimeError(f"Stage 4 top candidate {order} lacks target_chain/peptide_chain provenance")
+            raise RuntimeError(f"Stage 4 candidate {order} lacks target_chain/peptide_chain provenance")
         _reference_sequences(
             reference,
             target_chain,
@@ -505,7 +543,8 @@ def main() -> int:
     planned_jobs = planned_pairs * args.seeds_per_candidate_context
     planned_models = planned_jobs * args.models_per_seed
     if args.validate_inputs_only:
-        logger.info("Stage 4 top candidates validated: %s", len(validated_sources))
+        logger.info("Stage 4 candidates validated: %s", len(validated_sources))
+        logger.info("Stage 5B-v2 selection mode: %s", args.selection_mode)
         logger.info("Full target contexts validated: %s", len(selected_contexts))
         logger.info("Candidate-context pairs planned: %s", planned_pairs)
         logger.info("Seed jobs planned: %s", planned_jobs)
@@ -542,8 +581,11 @@ def main() -> int:
             "context_mapping_csv": staged_mapping,
         }
 
+    protocol_version = (
+        TOP5_PROTOCOL_VERSION if args.selection_mode == "top_validation" else ALL_PASS_PROTOCOL_VERSION
+    )
     protocol_payload = {
-        "protocol_version": PROTOCOL_VERSION,
+        "protocol_version": protocol_version,
         "validation_test_type": VALIDATION_TEST_TYPE,
         "contexts": selected_contexts,
         "context_pdb_sha256": {
@@ -568,9 +610,12 @@ def main() -> int:
         "stage4_protocol_identity_sha256": stage4["stage4_protocol_identity_sha256"],
         "stage4_top_candidates_csv_sha256": stage4["stage4_top_candidates_csv_sha256"],
         "context_control_route_manifest_sha256": context_route_sha256,
+        "candidate_selection_mode": args.selection_mode,
+        "candidate_count": len(validated_sources),
     }
     protocol_hash = canonical_json_sha256(protocol_payload)[:12]
-    campaign_id = f"stage5B_v2_top5_C1_C3_{stage4['stage4_run_id']}_{protocol_hash}"
+    campaign_label = "top5" if args.selection_mode == "top_validation" else f"all{len(validated_sources)}"
+    campaign_id = f"stage5B_v2_{campaign_label}_C1_C3_{stage4['stage4_run_id']}_{protocol_hash}"
     route_manifest_path, route_manifest, route_manifest_sha256 = write_route_manifest(
         output_root,
         {
@@ -600,11 +645,13 @@ def main() -> int:
                 },
             ],
             "stage5B_v2_protocol": protocol_payload,
+            "stage5_selection_mode": args.selection_mode,
             "stage5_campaign_id": campaign_id,
             "stage5_candidate_count": len(validated_sources),
             "stage5_context_count": len(selected_contexts),
             "stage5_seed_job_count": planned_jobs,
             "stage5_model_prediction_count": planned_models,
+            "stage5_job_shards": args.job_shards,
             "stage4_scores_csv": str(stage4["stage4_scores_csv"]),
             "stage4_scores_csv_sha256": stage4["stage4_scores_csv_sha256"],
             "stage4_top_candidates_csv": str(stage4["stage4_top_candidates_csv"]),
@@ -615,13 +662,21 @@ def main() -> int:
 
     manifest_rows: list[dict[str, Any]] = []
     job_rows: list[dict[str, Any]] = []
-    specs: list[Path] = []
+    representative_specs: list[Path] = []
+    representative_spec_keys: set[tuple[str, int]] = set()
     scripts_by_context: dict[str, list[Path]] = {context_id: [] for context_id in selected_contexts}
+    scripts_by_shard: list[list[Path]] = [[] for _ in range(args.job_shards)]
+    context_shard_counters: dict[str, int] = {context_id: 0 for context_id in selected_contexts}
     for order, source in enumerate(validated_sources, start=1):
         peptide = source["_peptide"]
         peptide_hash = _sha1_text(peptide)[:8]
         backbone_hash = _sha1_text(str(source["global_backbone_id"]))[:10]
-        candidate_id = f"S5B2CTX_{order:02d}_{source['batch']}_gb{backbone_hash}_seq{peptide_hash}"
+        candidate_prefix = "S5B2CTX" if args.selection_mode == "top_validation" else "S5B2CTXALL"
+        order_width = 2 if args.selection_mode == "top_validation" else 4
+        candidate_id = (
+            f"{candidate_prefix}_{order:0{order_width}d}_{source['batch']}_"
+            f"gb{backbone_hash}_seq{peptide_hash}"
+        )
         staged_reference = reference_dir / f"{candidate_id}_stage4_reference.pdb"
         staged_reference.parent.mkdir(parents=True, exist_ok=True)
         shutil.copy2(source["_reference"], staged_reference)
@@ -677,6 +732,7 @@ def main() -> int:
                 "models_per_seed": args.models_per_seed,
                 "protocol_hash": protocol_hash,
                 "stage5_campaign_id": campaign_id,
+                "stage5_selection_mode": args.selection_mode,
                 "status": "prepared_not_run",
                 "notes": "C1=protocol sanity; C3=native-context recovery; not a final peptide decision",
                 **{field: source.get(field, "") for field in SOURCE_ROUTE_PROVENANCE_FIELDS},
@@ -692,8 +748,9 @@ def main() -> int:
                     "stage5B_v2_candidate_context_id": candidate_context_id,
                     "stage5B_v2_candidate_id": candidate_id,
                     "protocol_hash": protocol_hash,
-                    "protocol_version": PROTOCOL_VERSION,
+                    "protocol_version": protocol_version,
                     "stage5_campaign_id": campaign_id,
+                    "stage5_selection_mode": args.selection_mode,
                     "validation_test_type": VALIDATION_TEST_TYPE,
                     "context_id": context_id,
                     "context_description": context["context_description"],
@@ -761,8 +818,17 @@ def main() -> int:
                         af_params=args.af_params,
                     ),
                 )
-                specs.append(spec_path)
+                if args.selection_mode == "top_validation":
+                    representative_specs.append(spec_path)
+                elif seed == 0:
+                    representative_key = (context_id, len(peptide))
+                    if representative_key not in representative_spec_keys:
+                        representative_specs.append(spec_path)
+                        representative_spec_keys.add(representative_key)
                 scripts_by_context[context_id].append(run_script)
+                shard_index = context_shard_counters[context_id] % args.job_shards
+                context_shard_counters[context_id] += 1
+                scripts_by_shard[shard_index].append(run_script)
                 job_rows.append(
                     {
                         "stage5B_v2_job_id": job_id,
@@ -772,6 +838,8 @@ def main() -> int:
                         "peptide_sequence_hash": peptide_hash,
                         "protocol_hash": protocol_hash,
                         "stage5_campaign_id": campaign_id,
+                        "stage5_selection_mode": args.selection_mode,
+                        "job_shard": shard_index + 1,
                         "seed": seed,
                         "requested_recycles": args.recycles,
                         "forward_passes": args.recycles + 1,
@@ -796,7 +864,7 @@ def main() -> int:
         _preflight_script(
             project_root=project_root,
             runner=runner,
-            specs=specs,
+            specs=representative_specs,
             python_bin=args.afcycdesign_python,
             source_dir=args.colabdesign_source,
             overlay_dir=args.python_overlay,
@@ -810,15 +878,34 @@ def main() -> int:
             jobs_dir / f"run_stage5B_v2_{_safe_token(context_id)}_all.sh",
             _master_script(preflight, scripts_by_context[context_id]),
         )
+    for shard_index, shard_scripts in enumerate(scripts_by_shard, start=1):
+        _write_text(
+            jobs_dir / f"run_stage5B_v2_C1_C3_shard_{shard_index:02d}_of_{args.job_shards:02d}.sh",
+            _master_script(preflight, shard_scripts),
+        )
 
     write_csv(output_dir / "FGA_rfpeptides_stage5B_v2_candidate_context_manifest.csv", manifest_rows, MANIFEST_FIELDS)
     write_csv(output_dir / "FGA_rfpeptides_stage5B_v2_prediction_jobs.csv", job_rows, JOB_FIELDS)
-    write_markdown(output_dir / "FGA_rfpeptides_stage5B_v2_plan.md", _plan_markdown(manifest_rows, output_dir))
+    write_markdown(
+        output_dir / "FGA_rfpeptides_stage5B_v2_plan.md",
+        _plan_markdown(
+            manifest_rows,
+            output_dir,
+            args.selection_mode,
+            len(job_rows),
+            len(job_rows) * args.models_per_seed,
+            args.job_shards,
+            len(representative_specs),
+        ),
+    )
     logger.info("Stage 5B-v2 candidates prepared: %s", len(validated_sources))
     logger.info("Stage 5B-v2 contexts prepared: %s", len(selected_contexts))
     logger.info("Candidate-context pairs prepared: %s", len(manifest_rows))
     logger.info("Seed jobs prepared: %s", len(job_rows))
     logger.info("Planned model predictions: %s", len(job_rows) * args.models_per_seed)
+    logger.info("Stage 5B-v2 selection mode: %s", args.selection_mode)
+    logger.info("Stage 5B-v2 job shards: %s", args.job_shards)
+    logger.info("Representative preflight specs: %s", len(representative_specs))
     logger.info("Output directory: %s", output_dir)
     logger.info("No Stage 5B-v2 prediction was run.")
     return 0

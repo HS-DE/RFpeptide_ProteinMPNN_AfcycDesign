@@ -261,3 +261,11 @@ peptide template、peptide initial guess 或 Stage 4 complex 输入，并只对 
 启动模型预测。Stage 5 从早期 Stage 5A、旧 masked-template Stage 5B、target-only
 和 C0-C3 诊断到当前 C1/C3 协议的完整经过，记录在
 `06_任务书快照/FGA_RFPEPTIDES_STAGE5流程记录_20260806.md`。
+
+### Stage 5B-v2 全量 C1/C3
+
+`34/35` 与对应 runner 现支持 `all_stage4_pass`。当前全量 campaign 已完成
+2,372 条候选的任务准备：4,744 个 C1/C3 seed jobs、23,720 个模型预测、
+6 个 C1/C3 均衡 shard。全量输入校验、26 项代表性 preflight 和 collector
+只读契约检查均通过，但正式预测尚未启动。运行与断点续跑命令见 Stage 5
+流程记录；生成的 results 目录不纳入本审查仓库。

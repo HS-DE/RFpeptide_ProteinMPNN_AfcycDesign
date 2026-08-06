@@ -11,7 +11,10 @@ from typing import Any, Mapping
 import run_afcycdesign_target_context_control as context_runner
 
 
-PROTOCOL_VERSION = "stage5B_v2_C1_C3_full_target_template_top5_v1"
+TOP5_PROTOCOL_VERSION = "stage5B_v2_C1_C3_full_target_template_top5_v1"
+ALL_PASS_PROTOCOL_VERSION = "stage5B_v2_C1_C3_full_target_template_allpass_v1"
+SUPPORTED_PROTOCOL_VERSIONS = {TOP5_PROTOCOL_VERSION, ALL_PASS_PROTOCOL_VERSION}
+PROTOCOL_VERSION = TOP5_PROTOCOL_VERSION
 VALIDATION_TEST_TYPE = "target_context_structure_conditioned_recovery"
 LEGAL_AA = set("ACDEFGHIKLMNPQRSTVWY")
 STAGE4_IDENTITY_FIELDS = (
@@ -37,6 +40,7 @@ CACHE_IDENTITY_FIELDS = (
     "protocol_hash",
     "protocol_version",
     "stage5_campaign_id",
+    "stage5_selection_mode",
     "validation_test_type",
     "context_id",
     "context_pdb_sha256",
@@ -90,6 +94,7 @@ METRIC_FIELDS = [
     "stage5B_v2_candidate_id",
     "context_id",
     "protocol_hash",
+    "stage5_selection_mode",
     "peptide_sequence_hash",
     "seed",
     "model_name",
@@ -167,6 +172,11 @@ def _as_int_list(value: Any, label: str) -> list[int]:
 def _read_job_spec(path: Path) -> dict[str, Any]:
     with path.open("r", encoding="utf-8") as handle:
         spec = json.load(handle)
+    if (
+        "stage5_selection_mode" not in spec
+        and str(spec.get("protocol_version", "")) == TOP5_PROTOCOL_VERSION
+    ):
+        spec["stage5_selection_mode"] = "top_validation"
     required = set(CACHE_IDENTITY_FIELDS) | {
         "context_pdb",
         "context_mapping_csv",
@@ -177,8 +187,14 @@ def _read_job_spec(path: Path) -> dict[str, Any]:
     missing = sorted(required - set(spec))
     if missing:
         raise RuntimeError(f"Stage 5B-v2 job spec is missing fields: {','.join(missing)}")
-    if str(spec["protocol_version"]) != PROTOCOL_VERSION:
+    if str(spec["protocol_version"]) not in SUPPORTED_PROTOCOL_VERSIONS:
         raise RuntimeError("Unexpected Stage 5B-v2 protocol version")
+    selection_mode = str(spec["stage5_selection_mode"])
+    expected_version = (
+        TOP5_PROTOCOL_VERSION if selection_mode == "top_validation" else ALL_PASS_PROTOCOL_VERSION
+    )
+    if selection_mode not in {"top_validation", "all_stage4_pass"} or str(spec["protocol_version"]) != expected_version:
+        raise RuntimeError("Stage 5B-v2 selection mode and protocol version disagree")
     if str(spec["validation_test_type"]) != VALIDATION_TEST_TYPE:
         raise RuntimeError("Unexpected Stage 5B-v2 validation_test_type")
     if str(spec["context_id"]) not in {
@@ -623,6 +639,7 @@ def _run_prediction(spec: Mapping[str, Any], af_params: Path) -> None:
                 "stage5B_v2_candidate_id": spec["stage5B_v2_candidate_id"],
                 "context_id": spec["context_id"],
                 "protocol_hash": spec["protocol_hash"],
+                "stage5_selection_mode": spec["stage5_selection_mode"],
                 "peptide_sequence_hash": spec["peptide_sequence_hash"],
                 "seed": seed,
                 "model_name": model_name,

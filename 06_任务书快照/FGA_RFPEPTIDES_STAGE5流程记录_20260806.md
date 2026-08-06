@@ -234,3 +234,94 @@ python scripts/35_collect_stage5b_v2_context_validation.py \
    pose 未恢复。
 4. C3 target 自身未恢复：C3 对该 peptide 的否定结果仍不可判定，不能据此淘汰。
 5. 即使获得 strong support，也只是进入下一轮正交预测/筛选，不是 final peptide。
+
+## 9. 全量 C1/C3 campaign 准备，2026-08-06
+
+在 top5 C1/C3 协议通过输入检查后，同一协议被扩展到全部 2,372 条
+Stage 4 hard-QC pass。全量模式不增加 seed 数，仍然是每个
+candidate-context 1 个 seed、5 个 AlphaFold multimer-v3 parameter sets：
+
+```text
+selection_mode: all_stage4_pass
+candidates: 2372
+contexts: C1_crop86_full_template, C3_native_GHI301_full_template
+candidate-context pairs: 4744
+seed jobs: 4744
+model predictions: 23720
+requested recycles: 6
+forward passes per model: 7
+job shards: 6
+representative preflight specs: 26
+```
+
+输出目录：
+
+```text
+results/rfpeptides_head_to_tail_v1_20260806_stage5B_v2_all2372_C1_C3/
+  07_structure_validation_target_context_conditioned/
+```
+
+准备阶段已经完成以下检查：
+
+1. 2,372 条 Stage 4 candidate 的序列、PDB、链角色与 SHA-256 全部通过。
+2. 4,744 个 candidate-context ID 和 job ID 全部唯一。
+3. 六个 shard 均同时包含 C1 和 C3：shard 1/2 各含 396+396 个 jobs，
+   shard 3-6 各含 395+395 个 jobs。
+4. 26 个代表性 preflight 覆盖 C1/C3 和实际出现的 12-24 aa 肽长；C1
+   template coverage 为 86/86，C3 为 301/301，peptide coverage 始终为 0。
+5. Stage 35 对完整 4,744 行 manifest/job/spec 输入执行只读校验并通过。
+
+全量预测尚未启动。推荐先按每张 GPU 一个进程顺序跑三个 shard，稳定性优先：
+
+```bash
+# GPU 0 窗口
+cd /mnt/c/SH/fga_cyclic_peptide_design
+ROOT=results/rfpeptides_head_to_tail_v1_20260806_stage5B_v2_all2372_C1_C3
+JOBDIR="$ROOT/07_structure_validation_target_context_conditioned/jobs"
+
+for s in 01 03 05; do
+  CUDA_VISIBLE_DEVICES=0 RUN_STAGE5B_V2_PREDICTIONS=YES bash \
+    "$JOBDIR/run_stage5B_v2_C1_C3_shard_${s}_of_06.sh" || break
+done
+```
+
+```bash
+# GPU 1 窗口
+cd /mnt/c/SH/fga_cyclic_peptide_design
+ROOT=results/rfpeptides_head_to_tail_v1_20260806_stage5B_v2_all2372_C1_C3
+JOBDIR="$ROOT/07_structure_validation_target_context_conditioned/jobs"
+
+for s in 02 04 06; do
+  CUDA_VISIBLE_DEVICES=1 RUN_STAGE5B_V2_PREDICTIONS=YES bash \
+    "$JOBDIR/run_stage5B_v2_C1_C3_shard_${s}_of_06.sh" || break
+done
+```
+
+这些脚本可以重复执行；runner 只有在 metadata、协议身份、模型记录及 PDB/NPZ
+全部匹配时才跳过已完成 job。不要同时运行总脚本和 shard 脚本，以免两个进程
+竞争同一输出目录。
+
+查看进度：
+
+```bash
+ROOT=results/rfpeptides_head_to_tail_v1_20260806_stage5B_v2_all2372_C1_C3/07_structure_validation_target_context_conditioned
+echo "completed jobs: $(find "$ROOT/predictions" -type f -name run_metadata.json | wc -l) / 4744"
+echo "written model PDBs: $(find "$ROOT/predictions" -type f -name '*.pdb' | wc -l) / 23720"
+```
+
+全部完成后收集：
+
+```bash
+cd /mnt/c/SH/fga_cyclic_peptide_design
+source ~/fga_model_envs/miniforge3/etc/profile.d/conda.sh
+conda activate fga_stage1_fpocket
+
+python scripts/35_collect_stage5b_v2_context_validation.py \
+  --stage5b-v2-root results/rfpeptides_head_to_tail_v1_20260806_stage5B_v2_all2372_C1_C3/07_structure_validation_target_context_conditioned \
+  --project-config config/rfpeptides_head_to_tail.yaml
+```
+
+基于 C0-C3 control 的单 job 时间，本轮在每张 GPU 单进程时只能粗略估计为约
+两天量级；实际时间取决于 GPU、并行度和 C3 301-aa context 的开销。正式输出
+预计需要数 GB 磁盘空间，运行前应预留至少 10 GB。该 campaign 是大范围恢复
+信号搜索，不是 final peptide selection。

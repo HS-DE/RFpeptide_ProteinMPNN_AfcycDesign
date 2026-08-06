@@ -9,6 +9,7 @@ import unittest
 ROOT = Path(__file__).resolve().parents[1]
 SCRIPTS = ROOT / "scripts"
 sys.path.insert(0, str(SCRIPTS))
+sys.path.insert(0, str(SCRIPTS / "external"))
 
 import stage5_contract as contract  # noqa: E402
 
@@ -26,6 +27,14 @@ stage5a_prep = _load("stage5a_prep", SCRIPTS / "26_prepare_afcycdesign_jobs.py")
 stage5a_collect = _load("stage5a_collect", SCRIPTS / "27_collect_afcycdesign_validation.py")
 stage5b_prep = _load("stage5b_prep", SCRIPTS / "30_prepare_stage5b_target_conditioned_jobs.py")
 stage5b_collect = _load("stage5b_collect", SCRIPTS / "31_collect_stage5b_validation.py")
+stage5b_v2_context_prep = _load(
+    "stage5b_v2_context_prep",
+    SCRIPTS / "34_prepare_stage5b_v2_context_jobs.py",
+)
+stage5b_v2_context_collect = _load(
+    "stage5b_v2_context_collect",
+    SCRIPTS / "35_collect_stage5b_v2_context_validation.py",
+)
 stage5a_runner = _load(
     "stage5a_runner",
     SCRIPTS / "external" / "run_afcycdesign_independent_recovery.py",
@@ -33,6 +42,10 @@ stage5a_runner = _load(
 stage5b_runner = _load(
     "stage5b_runner",
     SCRIPTS / "external" / "run_afcycdesign_target_conditioned_recovery.py",
+)
+stage5b_v2_context_runner = _load(
+    "stage5b_v2_context_runner",
+    SCRIPTS / "external" / "run_afcycdesign_stage5b_v2_context_recovery.py",
 )
 
 
@@ -61,6 +74,11 @@ class Stage5ProvenanceTests(unittest.TestCase):
             (stage5b_prep, "JOB_FIELDS"),
             (stage5b_collect, "MODEL_FIELDS"),
             (stage5b_collect, "CANDIDATE_FIELDS"),
+            (stage5b_v2_context_prep, "MANIFEST_FIELDS"),
+            (stage5b_v2_context_prep, "JOB_FIELDS"),
+            (stage5b_v2_context_collect, "MODEL_FIELDS"),
+            (stage5b_v2_context_collect, "CONTEXT_SUMMARY_FIELDS"),
+            (stage5b_v2_context_collect, "CANDIDATE_SUMMARY_FIELDS"),
         ):
             fields = getattr(module, field_name)
             self.assertEqual(len(fields), len(set(fields)), f"{module.__name__}.{field_name}")
@@ -122,6 +140,24 @@ class Stage5ProvenanceTests(unittest.TestCase):
         ]
         selected = contract._stage4_pass_rows_by_priority(rows)
         self.assertEqual([row["stage4_design_id"] for row in selected], ["pass_1", "pass_3"])
+
+    def test_stage5b_v2_context_all_pass_campaign_controls_are_present(self) -> None:
+        self.assertIn("stage5_selection_mode", stage5b_v2_context_prep.MANIFEST_FIELDS)
+        self.assertIn("stage5_selection_mode", stage5b_v2_context_prep.JOB_FIELDS)
+        self.assertIn("job_shard", stage5b_v2_context_prep.JOB_FIELDS)
+        self.assertIn("stage5_selection_mode", stage5b_v2_context_runner.CACHE_IDENTITY_FIELDS)
+        self.assertIn("stage5_selection_mode", stage5b_v2_context_runner.METRIC_FIELDS)
+        self.assertEqual(
+            stage5b_v2_context_runner.SUPPORTED_PROTOCOL_VERSIONS,
+            {
+                "stage5B_v2_C1_C3_full_target_template_top5_v1",
+                "stage5B_v2_C1_C3_full_target_template_allpass_v1",
+            },
+        )
+        prep_text = (SCRIPTS / "34_prepare_stage5b_v2_context_jobs.py").read_text(encoding="utf-8")
+        self.assertIn("--allow-large-campaign", prep_text)
+        self.assertIn("--job-shards", prep_text)
+        self.assertIn("S5B2CTXALL", prep_text)
 
     def test_stage4_hard_gate_rejects_clash(self) -> None:
         row = {

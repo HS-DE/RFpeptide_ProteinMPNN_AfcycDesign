@@ -7,7 +7,7 @@ import importlib.util
 import json
 import math
 import os
-from collections import defaultdict
+from collections import Counter, defaultdict
 from pathlib import Path
 from typing import Any, Iterable, Mapping, Sequence
 
@@ -36,7 +36,10 @@ from stage5_contract import STAGE4_IDENTITY_FIELDS
 
 SCRIPT_DIR = Path(__file__).resolve().parent
 STAGE5B_V1_COLLECTOR = SCRIPT_DIR / "31_collect_stage5b_validation.py"
-PROTOCOL_VERSION = "stage5B_v2_C1_C3_full_target_template_top5_v1"
+TOP5_PROTOCOL_VERSION = "stage5B_v2_C1_C3_full_target_template_top5_v1"
+ALL_PASS_PROTOCOL_VERSION = "stage5B_v2_C1_C3_full_target_template_allpass_v1"
+SUPPORTED_PROTOCOL_VERSIONS = {TOP5_PROTOCOL_VERSION, ALL_PASS_PROTOCOL_VERSION}
+PROTOCOL_VERSION = TOP5_PROTOCOL_VERSION
 VALIDATION_TEST_TYPE = "target_context_structure_conditioned_recovery"
 BACKBONE_ATOMS = ("N", "CA", "C")
 
@@ -47,6 +50,7 @@ MODEL_FIELDS = [
     "context_id",
     "protocol_hash",
     "stage5_campaign_id",
+    "stage5_selection_mode",
     "selection_order",
     "batch",
     "backbone_id",
@@ -124,6 +128,7 @@ CONTEXT_SUMMARY_FIELDS = [
     "stage5B_v2_candidate_context_id",
     "stage5B_v2_candidate_id",
     "context_id",
+    "stage5_selection_mode",
     "selection_order",
     "batch",
     "backbone_id",
@@ -159,6 +164,7 @@ CONTEXT_SUMMARY_FIELDS = [
 
 CANDIDATE_SUMMARY_FIELDS = [
     "stage5B_v2_candidate_id",
+    "stage5_selection_mode",
     "selection_order",
     "batch",
     "backbone_id",
@@ -267,11 +273,22 @@ def _validate_manifest_and_jobs(
     manifest_csv: Path,
     jobs_csv: Path,
     project_config: str,
-) -> tuple[list[dict[str, str]], list[dict[str, str]], dict[str, str]]:
+) -> tuple[list[dict[str, str]], list[dict[str, str]], dict[str, str], dict[str, Any]]:
     route_path, route_manifest, route_sha256 = load_route_manifest(stage5_root.parent)
     validate_route_project_config(project_config, route_manifest)
     protocol = route_manifest.get("stage5B_v2_protocol", {})
-    if protocol.get("protocol_version") != PROTOCOL_VERSION:
+    protocol_version = str(protocol.get("protocol_version", ""))
+    selection_mode = str(
+        route_manifest.get("stage5_selection_mode", protocol.get("candidate_selection_mode", "top_validation"))
+    )
+    expected_protocol_version = (
+        TOP5_PROTOCOL_VERSION if selection_mode == "top_validation" else ALL_PASS_PROTOCOL_VERSION
+    )
+    if (
+        protocol_version not in SUPPORTED_PROTOCOL_VERSIONS
+        or selection_mode not in {"top_validation", "all_stage4_pass"}
+        or protocol_version != expected_protocol_version
+    ):
         raise RuntimeError("Stage 5B-v2 route manifest protocol version mismatch")
     if protocol.get("contexts") != ["C1_crop86_full_template", "C3_native_GHI301_full_template"]:
         raise RuntimeError("Stage 5B-v2 route manifest does not contain ordered C1/C3 contexts")
@@ -288,10 +305,21 @@ def _validate_manifest_and_jobs(
     provenance = route_provenance_fields(route_path, route_manifest, route_sha256)
     manifests = read_csv(manifest_csv)
     jobs = read_csv(jobs_csv)
-    if len(manifests) != 10:
-        raise RuntimeError(f"Stage 5B-v2 requires 10 candidate-context rows, observed {len(manifests)}")
+    for row in manifests:
+        row.setdefault("stage5_selection_mode", selection_mode)
+    for row in jobs:
+        row.setdefault("stage5_selection_mode", selection_mode)
+    candidate_count = int(route_manifest.get("stage5_candidate_count", 0))
+    expected_manifest_rows = candidate_count * 2
+    if candidate_count < 1 or len(manifests) != expected_manifest_rows:
+        raise RuntimeError(
+            f"Stage 5B-v2 requires {expected_manifest_rows} candidate-context rows, observed {len(manifests)}"
+        )
     if not jobs:
         raise RuntimeError("Stage 5B-v2 job table is empty")
+    expected_jobs = int(route_manifest.get("stage5_seed_job_count", 0))
+    if expected_jobs < 1 or len(jobs) != expected_jobs:
+        raise RuntimeError(f"Stage 5B-v2 requires {expected_jobs} jobs, observed {len(jobs)}")
     for row in manifests:
         validate_row_route_provenance(row, provenance, f"Stage 35 manifest {row.get('stage5B_v2_candidate_context_id')}")
     for row in jobs:
@@ -303,8 +331,8 @@ def _validate_manifest_and_jobs(
     for row in manifests:
         grouped_contexts[row["stage5B_v2_candidate_id"]].add(row["context_id"])
     expected_contexts = {"C1_crop86_full_template", "C3_native_GHI301_full_template"}
-    if len(grouped_contexts) != 5 or any(value != expected_contexts for value in grouped_contexts.values()):
-        raise RuntimeError("Each of five candidates must have exactly C1 and C3 rows")
+    if len(grouped_contexts) != candidate_count or any(value != expected_contexts for value in grouped_contexts.values()):
+        raise RuntimeError("Each selected candidate must have exactly C1 and C3 rows")
     manifest_lookup = {row["stage5B_v2_candidate_context_id"]: row for row in manifests}
     job_ids: set[str] = set()
     for job in jobs:
@@ -321,6 +349,7 @@ def _validate_manifest_and_jobs(
             "peptide_sequence_hash",
             "protocol_hash",
             "stage5_campaign_id",
+            "stage5_selection_mode",
         ):
             if str(job.get(field)) != str(candidate.get(field)):
                 raise RuntimeError(f"Job {job_id} differs from manifest on {field}")
@@ -336,10 +365,11 @@ def _validate_manifest_and_jobs(
             "peptide_sequence_hash",
             "protocol_hash",
             "stage5_campaign_id",
+            "stage5_selection_mode",
         ):
             if str(spec.get(field)) != str(job.get(field)):
                 raise RuntimeError(f"Job spec {job_id} differs from job table on {field}")
-        if spec.get("protocol_version") != PROTOCOL_VERSION or spec.get("validation_test_type") != VALIDATION_TEST_TYPE:
+        if spec.get("protocol_version") != protocol_version or spec.get("validation_test_type") != VALIDATION_TEST_TYPE:
             raise RuntimeError(f"Job spec {job_id} has the wrong protocol identity")
         if spec.get("template_mode") != "target_context_full" or any(bool(spec.get(field)) for field in (
             "template_sequence_masked",
@@ -364,17 +394,27 @@ def _validate_manifest_and_jobs(
             raise RuntimeError(f"Context mapping SHA-256 mismatch: {job_id}")
         if sha256_file(reference_pdb) != spec["reference_design_pdb_sha256"]:
             raise RuntimeError(f"Posthoc reference SHA-256 mismatch: {job_id}")
-    return manifests, jobs, provenance
+    return manifests, jobs, provenance, {
+        "selection_mode": selection_mode,
+        "protocol_version": protocol_version,
+        "candidate_count": candidate_count,
+    }
 
 
 def _metadata_valid(metadata: Mapping[str, Any], job: Mapping[str, str], candidate: Mapping[str, str]) -> bool:
+    expected_protocol_version = (
+        TOP5_PROTOCOL_VERSION
+        if candidate["stage5_selection_mode"] == "top_validation"
+        else ALL_PASS_PROTOCOL_VERSION
+    )
     checks = [
         metadata.get("stage5B_v2_job_id") == job["stage5B_v2_job_id"],
         metadata.get("stage5B_v2_candidate_context_id") == candidate["stage5B_v2_candidate_context_id"],
         metadata.get("stage5B_v2_candidate_id") == candidate["stage5B_v2_candidate_id"],
         metadata.get("context_id") == candidate["context_id"],
         metadata.get("protocol_hash") == candidate["protocol_hash"],
-        metadata.get("protocol_version") == PROTOCOL_VERSION,
+        metadata.get("protocol_version") == expected_protocol_version,
+        metadata.get("stage5_selection_mode") == candidate["stage5_selection_mode"],
         metadata.get("validation_test_type") == VALIDATION_TEST_TYPE,
         metadata.get("template_mode") == "target_context_full",
         metadata.get("template_sequence_masked") is False,
@@ -552,6 +592,7 @@ def _model_row(
             "stage5B_v2_candidate_id": candidate["stage5B_v2_candidate_id"],
             "context_id": candidate["context_id"],
             "protocol_hash": candidate["protocol_hash"],
+            "stage5_selection_mode": candidate["stage5_selection_mode"],
         }.items()
     )
     protocol_valid = protocol_valid and metric_identity
@@ -576,6 +617,7 @@ def _model_row(
         "context_id": candidate["context_id"],
         "protocol_hash": candidate["protocol_hash"],
         "stage5_campaign_id": candidate["stage5_campaign_id"],
+        "stage5_selection_mode": candidate["stage5_selection_mode"],
         "selection_order": candidate["selection_order"],
         "batch": candidate["batch"],
         "backbone_id": candidate["backbone_id"],
@@ -704,6 +746,7 @@ def _context_summaries(
                 "stage5B_v2_candidate_context_id": manifest["stage5B_v2_candidate_context_id"],
                 "stage5B_v2_candidate_id": manifest["stage5B_v2_candidate_id"],
                 "context_id": manifest["context_id"],
+                "stage5_selection_mode": manifest["stage5_selection_mode"],
                 "selection_order": manifest["selection_order"],
                 "batch": manifest["batch"],
                 "backbone_id": manifest["backbone_id"],
@@ -777,6 +820,7 @@ def _candidate_summaries(
         output.append(
             {
                 "stage5B_v2_candidate_id": candidate_id,
+                "stage5_selection_mode": manifest["stage5_selection_mode"],
                 "selection_order": manifest["selection_order"],
                 "batch": manifest["batch"],
                 "backbone_id": manifest["backbone_id"],
@@ -813,6 +857,7 @@ def _report(
     models: Sequence[Mapping[str, Any]],
     context_rows: Sequence[Mapping[str, Any]],
     candidates: Sequence[Mapping[str, Any]],
+    selection_mode: str,
     args: argparse.Namespace,
 ) -> str:
     candidate_columns = [
@@ -840,9 +885,31 @@ def _report(
         "best_hotspot_distance_A",
         "context_support_class",
     ]
-    return f"""# Stage 5B-v2 C1/C3 Top-5 Validation Report
+    support_counts = Counter(str(row["cross_context_support_class"]) for row in candidates)
+    support_order = {
+        "stage5B_v2_native_context_strong_support": 0,
+        "stage5B_v2_native_context_partial_support": 1,
+        "stage5B_v2_crop_only_support": 2,
+        "stage5B_v2_not_recovered": 3,
+        "stage5B_v2_native_context_not_evaluable": 4,
+    }
+    displayed_candidates = sorted(
+        candidates,
+        key=lambda row: (
+            support_order.get(str(row["cross_context_support_class"]), 99),
+            int(row["selection_order"]),
+        ),
+    )[: args.top_report]
+    displayed_ids = {str(row["stage5B_v2_candidate_id"]) for row in displayed_candidates}
+    displayed_contexts = [
+        row for row in context_rows if str(row["stage5B_v2_candidate_id"]) in displayed_ids
+    ]
+    support_count_lines = "\n".join(
+        f"{key}: {support_counts[key]}" for key in sorted(support_counts, key=lambda key: support_order.get(key, 99))
+    ) or "none: 0"
+    return f"""# Stage 5B-v2 C1/C3 Validation Report
 
-This report evaluates the corrected-route Stage 4 top five under two full
+This report evaluates corrected-route Stage 4 candidates under two full
 target-template contexts. C1 is a restricted 86-aa protocol sanity test. C3 is
 the native G/H/I context and carries more biological weight for Site_2 recovery.
 
@@ -858,6 +925,7 @@ were used only after prediction for alignment and pose/contact recovery metrics.
 models_completed: {len(models)}
 candidate_context_pairs: {len(context_rows)}
 candidates: {len(candidates)}
+selection_mode: {selection_mode}
 fga_global_CA_RMSD_A min/median/max: {_distribution(models, 'fga_global_CA_RMSD_A')}
 stage0_crop_local_CA_RMSD_A min/median/max: {_distribution(models, 'stage0_crop_local_CA_RMSD_A')}
 peptide_backbone_RMSD_A min/median/max: {_distribution(models, 'target_aligned_peptide_backbone_RMSD_A')}
@@ -880,11 +948,18 @@ moderate_peptide_pose_RMSD_A: <= {args.moderate_pose_rmsd:g}
 
 ## Cross-context Candidate Interpretation
 
-{rows_to_markdown(candidates, candidate_columns, "No candidate results were collected.")}
+```text
+{support_count_lines}
+```
+
+The table below is limited to the first {args.top_report} rows after sorting by
+support class and Stage 4 selection order. The CSV contains every candidate.
+
+{rows_to_markdown(displayed_candidates, candidate_columns, "No candidate results were collected.")}
 
 ## Candidate-context Results
 
-{rows_to_markdown(context_rows, context_columns, "No context results were collected.")}
+{rows_to_markdown(displayed_contexts, context_columns, "No context results were collected.")}
 
 These are computational recovery tests, not final peptide candidates and not
 experimental affinity measurements. A C1-only recovery can be caused by the
@@ -914,6 +989,7 @@ def main() -> int:
     parser.add_argument("--max-partner-after-fga-rmsd", type=float, default=4.0)
     parser.add_argument("--strong-pose-rmsd", type=float, default=3.0)
     parser.add_argument("--moderate-pose-rmsd", type=float, default=5.0)
+    parser.add_argument("--top-report", type=int, default=100)
     args = parser.parse_args()
 
     logger = setup_logger("35_collect_stage5b_v2_context_validation")
@@ -922,6 +998,8 @@ def main() -> int:
         raise RuntimeError("--min-site-contact-fraction must be between 0 and 1")
     if args.moderate_pose_rmsd < args.strong_pose_rmsd:
         raise RuntimeError("--moderate-pose-rmsd must be >= --strong-pose-rmsd")
+    if args.top_report < 1:
+        raise RuntimeError("--top-report must be positive")
     stage5_root = assert_active_route_path(
         _resolve_mixed_path(args.stage5b_v2_root), "Stage 35 Stage 5B-v2 root"
     )
@@ -937,7 +1015,7 @@ def main() -> int:
         else stage5_root / "FGA_rfpeptides_stage5B_v2_prediction_jobs.csv",
         "Stage 35 jobs CSV",
     )
-    manifests, jobs, _ = _validate_manifest_and_jobs(
+    manifests, jobs, _, campaign = _validate_manifest_and_jobs(
         stage5_root=stage5_root,
         manifest_csv=manifest_csv,
         jobs_csv=jobs_csv,
@@ -999,7 +1077,13 @@ def main() -> int:
     )
     write_markdown(
         stage5_root / "FGA_rfpeptides_stage5B_v2_validation_report.md",
-        _report(models=model_rows, context_rows=context_rows, candidates=candidate_rows, args=args),
+        _report(
+            models=model_rows,
+            context_rows=context_rows,
+            candidates=candidate_rows,
+            selection_mode=str(campaign["selection_mode"]),
+            args=args,
+        ),
     )
     logger.info("Stage 5B-v2 model predictions parsed: %s", len(model_rows))
     logger.info("Stage 5B-v2 candidate-context summaries: %s", len(context_rows))

@@ -3074,3 +3074,24 @@ Chinese chronology, commands, limitations, and interpretation rules are in:
 ```text
 FGA_RFPEPTIDES_STAGE5流程记录_20260806.md
 ```
+
+## Stage 5B-v2 all-pass C1/C3 campaign, 2026-08-06
+
+The C1/C3 full-target-template protocol now supports both the official top-five
+audit set and `all_stage4_pass`. The all-pass campaign is prepared under:
+
+```text
+results/rfpeptides_head_to_tail_v1_20260806_stage5B_v2_all2372_C1_C3/
+```
+
+Its locked scope is 2,372 candidates, two contexts, 4,744 seed jobs, 23,720
+model predictions, one seed per candidate-context, five multimer-v3 parameter
+sets, and six requested recycles. Six shards each contain an approximately
+equal number of C1 and C3 jobs. Twenty-six representative preflights cover both
+contexts and every observed peptide length; the complete 4,744-row collector
+input contract also passed validation. No prediction has been started.
+
+Production launch commands, restart behavior, collection command, and
+interpretation limits are recorded in
+`FGA_RFPEPTIDES_STAGE5流程记录_20260806.md`. This broad campaign remains a
+computational recovery screen and does not create final peptide candidates.
