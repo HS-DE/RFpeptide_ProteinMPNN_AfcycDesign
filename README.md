@@ -247,3 +247,17 @@ Stage 5B top 5 已完成 25/25 jobs、125/125 models，但 5 条均未获得可�
 全量输入契约已只读验证 2372/2372，通过后可准备 11860 seed jobs、59300
 models，并分成 6 个可断点重跑的 shard。该全量任务只用于搜索稀有恢复信号，
 不证明协议整体可靠，也不是 final peptide candidates。
+
+## 2026-08-06 Stage 5 target-context diagnosis
+
+新增脚本 `32` 和 `33` 用于 C0-C3 target-context control；新增脚本 `34`、
+`35` 以及 `run_afcycdesign_stage5b_v2_context_recovery.py`，用于正式 top 5
+peptide 的 C1/C3 对照验证。C1 使用 86 aa crop 的完整 target template；C3
+使用包含 FGA/FGB/FGG 的 301 aa native context 完整 template。两者均不提供
+peptide template、peptide initial guess 或 Stage 4 complex 输入，并只对 peptide
+链应用 cyclic positional offset。
+
+本次仅完成 10 个 seed job、50 个模型预测的任务准备和端到端 preflight，尚未
+启动模型预测。Stage 5 从早期 Stage 5A、旧 masked-template Stage 5B、target-only
+和 C0-C3 诊断到当前 C1/C3 协议的完整经过，记录在
+`06_任务书快照/FGA_RFPEPTIDES_STAGE5流程记录_20260806.md`。

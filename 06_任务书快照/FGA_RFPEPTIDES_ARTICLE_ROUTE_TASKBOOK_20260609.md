@@ -3031,3 +3031,46 @@ cd /mnt/c/SH/fga_cyclic_peptide_design
 This campaign is not a final peptide selection. Any apparent recovery must
 still pass target recovery, Site_2/hotspot contact, macrocycle, clash,
 confidence, seed-diversity, and replication checks before it is promoted.
+
+## Stage 5 target-context diagnosis and Stage 5B-v2, 2026-08-06
+
+The completed 59,300-model Stage 5B broad scan used a masked target template
+(`rm_seq=true`, `rm_sc=true`, `rm_ic=true`). It produced zero target-recovery
+passes and therefore cannot be used to declare all 2,372 peptides failed, even
+though some predicted structures contacted Site_2/hotspot residues.
+
+Target-only C0-C3 controls separated template masking from target-context
+effects. C1 retained the full 86-aa crop template and improved median FGA RMSD
+from C0's 7.950 A to 1.383 A. C3 retained a 301-aa native G/H/I context; three
+of five model sets preserved the neighboring-chain architecture, while two
+collapsed. None passed every original local Site_2/hotspot threshold.
+
+The next controlled test is Stage 5B-v2 over the same official Stage 4 top 5:
+
+```text
+contexts: C1_crop86_full_template, C3_native_GHI301_full_template
+candidate-context pairs: 10
+seed jobs: 10
+planned model predictions: 50
+target template masking: false/false/false
+peptide template coverage: 0
+use_initial_guess: false
+dropout: false
+MLM: false
+```
+
+New scripts:
+
+```text
+scripts/34_prepare_stage5b_v2_context_jobs.py
+scripts/external/run_afcycdesign_stage5b_v2_context_recovery.py
+scripts/35_collect_stage5b_v2_context_validation.py
+```
+
+Preparation, route/identity validation, and all 10 ColabDesign template/cyclic
+preflights passed. No Stage 5B-v2 prediction has been started. The complete
+Chinese chronology, commands, limitations, and interpretation rules are in:
+
+```text
+FGA_RFPEPTIDES_STAGE5流程记录_20260806.md
+```
