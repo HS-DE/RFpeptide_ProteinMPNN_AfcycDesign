@@ -325,3 +325,21 @@ python scripts/35_collect_stage5b_v2_context_validation.py \
 两天量级；实际时间取决于 GPU、并行度和 C3 301-aa context 的开销。正式输出
 预计需要数 GB 磁盘空间，运行前应预留至少 10 GB。该 campaign 是大范围恢复
 信号搜索，不是 final peptide selection。
+
+## 10. 旧 top5 任务兼容修复，2026-08-07
+
+top5 C1/C3 运行在完成全部 5 个 C1 和前 3 个 C3 后中断。报错不是模型预测失败，
+而是旧 top5 job spec 生成时尚无 `stage5_selection_mode` 字段，之后为全量 campaign
+增强的共享 runner 将该字段纳入必需协议身份，因而拒绝了剩余旧 spec。
+
+兼容策略严格限定为旧协议版本
+`stage5B_v2_C1_C3_full_target_template_top5_v1`：缺失字段只读解释为
+`top_validation`。全量协议
+`stage5B_v2_C1_C3_full_target_template_allpass_v1` 仍必须显式记录
+`stage5_selection_mode=all_stage4_pass`，不允许使用兼容默认值。
+
+runner 与 collector 同时兼容旧 top5 spec、metadata 和 model metrics。已完成的
+8/8 个 top5 job 均重新通过缓存身份检查，因此重新运行原 master script 时会跳过
+这 8 个任务，只补跑最后 2 个 C3 job。top5 10/10 preflight 重新通过；全量任务的
+4,744 份 spec 均显式包含正确字段，C1/C3 各 2,372 份，代表性 26/26 preflight
+重新通过。全量任务不需要重新生成。

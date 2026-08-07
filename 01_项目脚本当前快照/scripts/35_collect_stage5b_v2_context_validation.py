@@ -267,6 +267,18 @@ def _sha1_arrays(*arrays: np.ndarray) -> str:
     return digest.hexdigest()
 
 
+def _selection_mode_with_legacy_top5_compat(
+    record: Mapping[str, Any],
+    *,
+    protocol_version: str = "",
+) -> str:
+    selection_mode = str(record.get("stage5_selection_mode", "")).strip()
+    effective_protocol_version = str(record.get("protocol_version", "") or protocol_version)
+    if not selection_mode and effective_protocol_version == TOP5_PROTOCOL_VERSION:
+        return "top_validation"
+    return selection_mode
+
+
 def _validate_manifest_and_jobs(
     *,
     stage5_root: Path,
@@ -306,9 +318,11 @@ def _validate_manifest_and_jobs(
     manifests = read_csv(manifest_csv)
     jobs = read_csv(jobs_csv)
     for row in manifests:
-        row.setdefault("stage5_selection_mode", selection_mode)
+        if not str(row.get("stage5_selection_mode", "")).strip():
+            row["stage5_selection_mode"] = selection_mode
     for row in jobs:
-        row.setdefault("stage5_selection_mode", selection_mode)
+        if not str(row.get("stage5_selection_mode", "")).strip():
+            row["stage5_selection_mode"] = selection_mode
     candidate_count = int(route_manifest.get("stage5_candidate_count", 0))
     expected_manifest_rows = candidate_count * 2
     if candidate_count < 1 or len(manifests) != expected_manifest_rows:
@@ -357,6 +371,12 @@ def _validate_manifest_and_jobs(
         if sha256_file(spec_path) != str(job["job_spec_sha256"]):
             raise RuntimeError(f"Job spec SHA-256 mismatch: {job_id}")
         spec = json.loads(spec_path.read_text(encoding="utf-8"))
+        spec_selection_mode = _selection_mode_with_legacy_top5_compat(
+            spec,
+            protocol_version=protocol_version,
+        )
+        if spec_selection_mode:
+            spec["stage5_selection_mode"] = spec_selection_mode
         for field in (
             "stage5B_v2_job_id",
             "stage5B_v2_candidate_context_id",
@@ -414,7 +434,10 @@ def _metadata_valid(metadata: Mapping[str, Any], job: Mapping[str, str], candida
         metadata.get("context_id") == candidate["context_id"],
         metadata.get("protocol_hash") == candidate["protocol_hash"],
         metadata.get("protocol_version") == expected_protocol_version,
-        metadata.get("stage5_selection_mode") == candidate["stage5_selection_mode"],
+        _selection_mode_with_legacy_top5_compat(
+            metadata,
+            protocol_version=expected_protocol_version,
+        ) == candidate["stage5_selection_mode"],
         metadata.get("validation_test_type") == VALIDATION_TEST_TYPE,
         metadata.get("template_mode") == "target_context_full",
         metadata.get("template_sequence_masked") is False,
@@ -584,6 +607,11 @@ def _model_row(
     else:
         pose_class = "poor_pose_recovery"
     hard_geometry = macrocycle_status == "pass_head_to_tail_geometry" and severe_clashes == 0
+    metric_protocol_version = (
+        TOP5_PROTOCOL_VERSION
+        if candidate["stage5_selection_mode"] == "top_validation"
+        else ALL_PASS_PROTOCOL_VERSION
+    )
     metric_identity = all(
         str(metric.get(field, "")) == str(expected)
         for field, expected in {
@@ -592,8 +620,14 @@ def _model_row(
             "stage5B_v2_candidate_id": candidate["stage5B_v2_candidate_id"],
             "context_id": candidate["context_id"],
             "protocol_hash": candidate["protocol_hash"],
-            "stage5_selection_mode": candidate["stage5_selection_mode"],
         }.items()
+    )
+    metric_identity = metric_identity and (
+        _selection_mode_with_legacy_top5_compat(
+            metric,
+            protocol_version=metric_protocol_version,
+        )
+        == candidate["stage5_selection_mode"]
     )
     protocol_valid = protocol_valid and metric_identity
     if not protocol_valid:

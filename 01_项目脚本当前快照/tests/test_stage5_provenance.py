@@ -159,6 +159,30 @@ class Stage5ProvenanceTests(unittest.TestCase):
         self.assertIn("--job-shards", prep_text)
         self.assertIn("S5B2CTXALL", prep_text)
 
+    def test_stage5b_v2_legacy_top5_selection_mode_is_read_only_compatible(self) -> None:
+        legacy_record = {
+            "protocol_version": "stage5B_v2_C1_C3_full_target_template_top5_v1",
+        }
+        self.assertEqual(
+            stage5b_v2_context_runner._selection_mode_with_legacy_top5_compat(legacy_record),
+            "top_validation",
+        )
+        self.assertEqual(
+            stage5b_v2_context_collect._selection_mode_with_legacy_top5_compat(legacy_record),
+            "top_validation",
+        )
+        all_pass_record = {
+            "protocol_version": "stage5B_v2_C1_C3_full_target_template_allpass_v1",
+        }
+        self.assertEqual(
+            stage5b_v2_context_runner._selection_mode_with_legacy_top5_compat(all_pass_record),
+            "",
+        )
+        self.assertEqual(
+            stage5b_v2_context_collect._selection_mode_with_legacy_top5_compat(all_pass_record),
+            "",
+        )
+
     def test_stage4_hard_gate_rejects_clash(self) -> None:
         row = {
             "pass_stage4_qc": "true",

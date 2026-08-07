@@ -3095,3 +3095,21 @@ Production launch commands, restart behavior, collection command, and
 interpretation limits are recorded in
 `FGA_RFPEPTIDES_STAGE5流程记录_20260806.md`. This broad campaign remains a
 computational recovery screen and does not create final peptide candidates.
+
+## Stage 5B-v2 legacy top-five compatibility fix, 2026-08-07
+
+The top-five C1/C3 run stopped after five C1 and three C3 jobs because its
+older job specifications predated the `stage5_selection_mode` identity field.
+This was a job-schema compatibility error, not a model-prediction failure.
+
+The runner and collector now apply a read-only fallback only when the protocol
+version is `stage5B_v2_C1_C3_full_target_template_top5_v1`: a missing selection
+mode is interpreted as `top_validation`. The all-pass protocol still requires
+an explicit `stage5_selection_mode=all_stage4_pass` and receives no fallback.
+
+All eight completed top-five jobs remain cache-valid, all ten top-five
+preflights pass, and rerunning the original master script will skip the eight
+completed jobs and execute only the final two C3 jobs. The 4,744 all-pass job
+specifications already contain the explicit selection mode, split evenly into
+2,372 C1 and 2,372 C3 jobs; all 26 representative preflights pass. The all-pass
+campaign does not need to be regenerated.

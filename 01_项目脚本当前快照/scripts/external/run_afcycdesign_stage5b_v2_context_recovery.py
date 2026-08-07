@@ -169,14 +169,24 @@ def _as_int_list(value: Any, label: str) -> list[int]:
     return values
 
 
+def _selection_mode_with_legacy_top5_compat(
+    record: Mapping[str, Any],
+    *,
+    protocol_version: str = "",
+) -> str:
+    selection_mode = str(record.get("stage5_selection_mode", "")).strip()
+    effective_protocol_version = str(record.get("protocol_version", "") or protocol_version)
+    if not selection_mode and effective_protocol_version == TOP5_PROTOCOL_VERSION:
+        return "top_validation"
+    return selection_mode
+
+
 def _read_job_spec(path: Path) -> dict[str, Any]:
     with path.open("r", encoding="utf-8") as handle:
         spec = json.load(handle)
-    if (
-        "stage5_selection_mode" not in spec
-        and str(spec.get("protocol_version", "")) == TOP5_PROTOCOL_VERSION
-    ):
-        spec["stage5_selection_mode"] = "top_validation"
+    selection_mode = _selection_mode_with_legacy_top5_compat(spec)
+    if selection_mode:
+        spec["stage5_selection_mode"] = selection_mode
     required = set(CACHE_IDENTITY_FIELDS) | {
         "context_pdb",
         "context_mapping_csv",
@@ -457,8 +467,15 @@ def _completed_output_is_valid(
             metrics = list(csv.DictReader(handle))
     except (OSError, ValueError, csv.Error):
         return False
-    if any(metadata.get(field) != spec.get(field) for field in CACHE_IDENTITY_FIELDS):
-        return False
+    for field in CACHE_IDENTITY_FIELDS:
+        if field == "stage5_selection_mode":
+            metadata_value = _selection_mode_with_legacy_top5_compat(metadata)
+            spec_value = _selection_mode_with_legacy_top5_compat(spec)
+        else:
+            metadata_value = metadata.get(field)
+            spec_value = spec.get(field)
+        if metadata_value != spec_value:
+            return False
     if metadata.get("loaded_colabdesign_commit") != loaded_commit or metadata.get("loaded_colabdesign_source") != str(source_dir):
         return False
     if metadata.get("template_input_verified") is not True:
@@ -476,6 +493,11 @@ def _completed_output_is_valid(
         if row.get("stage5B_v2_job_id") != spec["stage5B_v2_job_id"]:
             return False
         if row.get("protocol_hash") != spec["protocol_hash"]:
+            return False
+        if _selection_mode_with_legacy_top5_compat(
+            row,
+            protocol_version=str(spec["protocol_version"]),
+        ) != str(spec["stage5_selection_mode"]):
             return False
         if not Path(str(row.get("prediction_pdb", ""))).is_file() or not Path(str(row.get("prediction_npz", ""))).is_file():
             return False
