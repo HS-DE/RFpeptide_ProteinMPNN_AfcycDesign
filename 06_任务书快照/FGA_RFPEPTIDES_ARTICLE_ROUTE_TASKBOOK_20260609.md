@@ -3113,3 +3113,28 @@ completed jobs and execute only the final two C3 jobs. The 4,744 all-pass job
 specifications already contain the explicit selection mode, split evenly into
 2,372 C1 and 2,372 C3 jobs; all 26 representative preflights pass. The all-pass
 campaign does not need to be regenerated.
+
+## Stage 5B-v2 top-five C1/C3 results, 2026-08-07
+
+Stage 35 collected all 50/50 top-five C1/C3 model predictions. Full target
+templates improved global target and crop recovery, but strict local Site_2 and
+hotspot recovery remained limiting. C1 passed the global FGA threshold in
+25/25 models and the crop-local threshold in 22/25, but zero models passed all
+target checks. C3 passed the global FGA threshold in 20/25, crop-local in
+22/25, and partner-assembly in 22/25; one model passed every target-context
+check.
+
+No model recovered the peptide at the intended site: same-site recovery,
+hotspot-contact recovery, and strong/moderate pose recovery were all 0/50.
+Peptide backbone RMSD ranged from 21.199 to 45.632 A in C1 and 34.755 to
+108.263 A in C3. All 50 models retained pass-level terminal macrocycle geometry,
+while 35/50 had no severe clash.
+
+The cross-context result is one `stage5B_v2_not_recovered` candidate and four
+`stage5B_v2_native_context_not_evaluable` candidates, with zero strong or
+partial support. Candidate 4 supplied the clearest negative computational
+evidence because one C3 model passed the target checks but placed the peptide
+far from Site_2/hotspots. The other four lack positive recovery support but
+cannot be treated as experimentally failed peptides because their native target
+context did not fully pass the internal evaluation checks. These are not final
+peptide candidates.

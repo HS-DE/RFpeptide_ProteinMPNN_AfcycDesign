@@ -343,3 +343,61 @@ runner 与 collector 同时兼容旧 top5 spec、metadata 和 model metrics。�
 这 8 个任务，只补跑最后 2 个 C3 job。top5 10/10 preflight 重新通过；全量任务的
 4,744 份 spec 均显式包含正确字段，C1/C3 各 2,372 份，代表性 26/26 preflight
 重新通过。全量任务不需要重新生成。
+
+## 11. top5 C1/C3 正式结果，2026-08-07
+
+top5 C1/C3 已完成并由 Stage 35 收集：10 个 candidate-context、50/50 个模型，
+协议身份检查全部有效。此次结果必须把 target 恢复与 peptide pose 恢复分开解释。
+
+Target 恢复分项：
+
+```text
+C1: FGA global <= 3 A                 25/25
+C1: crop local <= 2 A                 22/25
+C1: Site_2 local <= 2 A                1/25
+C1: hotspot local <= 2 A               0/25
+C1: all target checks passed           0/25
+
+C3: FGA global <= 4 A                 20/25
+C3: crop local <= 2 A                 22/25
+C3: Site_2 local <= 2 A                1/25
+C3: hotspot local <= 2 A               2/25
+C3: partner assembly <= 4 A           22/25
+C3: all target checks passed           1/25
+```
+
+完整 target template 明显改善了 target 的全局与 crop 恢复，但 Site_2/hotspot
+局部几何仍是主要限制，因此不能把 50 个模型都视为 target 完全可评估。
+
+Peptide 恢复结果：
+
+```text
+same_target_site:                       0/50
+hotspot contacts:                       0/50
+strong pose recovery:                   0/50
+moderate pose recovery:                 0/50
+C1 peptide backbone RMSD range: 21.199-45.632 A
+C3 peptide backbone RMSD range: 34.755-108.263 A
+macrocycle geometry pass:              50/50
+no severe clash:                       35/50
+```
+
+第 4 条候选有一个 C3 模型通过全部 target context 检查，但 peptide backbone
+RMSD 为 98.316 A，hotspot 最小距离为 72.922 A，且 Site_2/hotspot contact 均为
+0，因此该模型提供了较直接的 peptide pose 未恢复证据。第 2 条候选在一个 C1
+模型中有 4 个 Site_2 contacts，hotspot 最小距离为 5.039 A，但 hotspot contact
+仍为 0、peptide RMSD 为 21.199 A，且 target 局部检查未全部通过，不能算作
+same-site recovery。
+
+跨 context 最终分层为：
+
+```text
+stage5B_v2_not_recovered:                 1 candidate
+stage5B_v2_native_context_not_evaluable:  4 candidates
+stage5B_v2_strong_support:                 0 candidates
+stage5B_v2_partial_support:                0 candidates
+```
+
+因此 top5 中目前没有获得正向结构恢复支持的候选。第 4 条有有限的直接负向证据；
+其余 4 条属于尚无正向支持且 C3 target 不完全可评估，不能据此宣称实验意义上的
+peptide 失败。这些结果不是 final peptide selection。
