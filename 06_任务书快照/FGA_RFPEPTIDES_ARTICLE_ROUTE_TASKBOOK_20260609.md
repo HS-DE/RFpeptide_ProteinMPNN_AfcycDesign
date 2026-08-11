@@ -3138,3 +3138,45 @@ far from Site_2/hotspots. The other four lack positive recovery support but
 cannot be treated as experimentally failed peptides because their native target
 context did not fully pass the internal evaluation checks. These are not final
 peptide candidates.
+
+## Stage 5B-v2 all-pass C1/C3 results, 2026-08-11
+
+Stage 35 collected the complete all-pass campaign: 2,372 candidates, 4,744
+candidate-context jobs, and 23,720/23,720 model predictions. All protocol
+identity checks passed. Target templates were active, peptide template coverage
+was zero, no peptide initial guess was used, and the cyclic positional offset
+was restricted to the peptide chain.
+
+C1 recovered the global FGA threshold in 11,845/11,860 models and the crop-local
+threshold in 10,340/11,860, but only two models passed every strict target check.
+C3 passed every target-context check in 381/11,860 models. Across all 23,720
+models there were no strong or moderate peptide-pose recoveries. C3 produced
+zero Site_2 contacts, zero hotspot contacts, and zero same-site recoveries.
+
+C1 produced 163 same-site models across 129 candidates, but none simultaneously
+passed the strict target checks; all retained failed hotspot-local target
+geometry. In C3, 381 candidates had at least one target-evaluable model, yet
+none recovered Site_2/hotspots. Of those target-evaluable models, 365 contacted
+FGA only at off-site locations. This supplies negative computational evidence
+for peptide pose/site recovery rather than a simple failure to identify the
+target chain.
+
+Cross-context classification was:
+
+```text
+stage5B_v2_strong_support:                   0
+stage5B_v2_partial_support:                  0
+stage5B_v2_not_recovered:                  381
+stage5B_v2_native_context_not_evaluable:  1991
+```
+
+The best peptide backbone RMSD was 5.848 A, already outside the moderate
+recovery threshold. That candidate recovered neither the native-context pose nor
+the native Site_2/hotspot contacts and is retained only as a diagnostic near
+miss. Therefore the current RFpeptides -> ProteinMPNN-only -> repack-only ->
+Stage 4 score-only route yielded no Stage 5-supported candidate. This does not
+prove that every peptide is an experimental non-binder because 1,991 native
+contexts remained non-evaluable under the strict internal target criteria, but
+no candidate should proceed as validated or final. The Stage 4 no-repack energy
+proxy was not predictive of independent/native-context pose recovery in this
+campaign.

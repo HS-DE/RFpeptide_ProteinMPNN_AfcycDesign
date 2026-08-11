@@ -401,3 +401,81 @@ stage5B_v2_partial_support:                0 candidates
 因此 top5 中目前没有获得正向结构恢复支持的候选。第 4 条有有限的直接负向证据；
 其余 4 条属于尚无正向支持且 C3 target 不完全可评估，不能据此宣称实验意义上的
 peptide 失败。这些结果不是 final peptide selection。
+
+## 12. 全量 2,372 条 C1/C3 正式结果，2026-08-11
+
+全量 Stage 5B-v2 已完成并由 Stage 35 收集。输入为 Stage 4 通过的 2,372 条候选，
+每条分别测试 C1 crop86 full-template 与 C3 native G/H/I full-template，共 4,744 个
+candidate-context job、23,720/23,720 个模型。所有模型均通过协议身份检查：target
+template 生效、peptide template coverage 为 0、`use_initial_guess=false`，且 cyclic
+positional offset 只施加于 peptide。
+
+总体分布：
+
+```text
+FGA global CA RMSD min/median/max:       1.018 / 2.515 / 40.392 A
+crop local CA RMSD min/median/max:       0.958 / 1.518 / 3.682 A
+peptide backbone RMSD min/median/max:    5.848 / 44.271 / 129.720 A
+hotspot minimum distance min/median/max: 0.730 / 29.386 / 106.907 A
+```
+
+Target 恢复分项：
+
+```text
+C1: FGA global <= 3 A               11845/11860
+C1: crop local <= 2 A               10340/11860
+C1: Site_2 local <= 2 A               366/11860
+C1: hotspot local <= 2 A                2/11860
+C1: all target checks passed             2/11860
+
+C3: FGA global <= 4 A                9131/11860
+C3: crop local <= 2 A               11012/11860
+C3: Site_2 local <= 2 A               511/11860
+C3: hotspot local <= 2 A             1337/11860
+C3: partner assembly <= 4 A          9280/11860
+C3: all target checks passed           381/11860
+```
+
+Peptide pose 与位点恢复：
+
+```text
+C1 same-site models:                    163 models / 129 candidates
+C1 strict-target-pass AND same-site:      0
+C3 same-site models:                      0
+C3 Site_2 contacts:                       0
+C3 hotspot contacts:                      0
+strong pose recovery (<= 3 A):            0/23720
+moderate pose recovery (3-5 A):           0/23720
+macrocycle geometry pass:             23717/23720
+no severe clash:                      16218/23720
+```
+
+C1 的 163 个 same-site 模型不能作为正向恢复：它们没有一个同时通过严格 target
+恢复，全部仍未恢复 hotspot 局部几何。C3 的结果更有判别力：381 条候选各自至少有
+一个模型通过全部 target-context 检查，但其中没有一个恢复 Site_2/hotspot；这些
+模型中有 365 个仍接触 FGA，但接触位点均为 off-site。也就是说，collector 并非
+简单漏掉了 FGA 接触，而是预测 peptide 没有回到设计位点。
+
+候选级跨 context 分层：
+
+```text
+stage5B_v2_strong_support:                   0
+stage5B_v2_partial_support:                  0
+stage5B_v2_not_recovered:                  381
+stage5B_v2_native_context_not_evaluable:  1991
+```
+
+全局最小 peptide RMSD 为 5.848 A，对应 selection order 1752、backbone
+`rfp_c86cbee4a8b44246__RFpep_Site_2_1521`、序列
+`ISESRIEKLLRKDPSLLSTIPES`。它在 C1 中出现一个近位点模型，但未同时通过严格
+target 检查；在 C3 中虽有 target 可评估模型，peptide RMSD 为 62.137 A、hotspot
+距离为 51.595 A。因此它只能保留为 context-sensitivity diagnostic near miss，
+不能作为 lead。
+
+本轮结论是：当前 RFpeptides backbone -> ProteinMPNN-only -> repack-only ->
+Stage 4 score-only 路线选出的 2,372 条候选，在 Stage 5B-v2 中没有获得正向结构
+恢复支持。Stage 4 的 no-repack interface proxy 未能预测 Stage 5 的位点/pose
+恢复。该结果不等同于证明所有序列在实验中必然不结合，因为 1,991 条候选的 C3
+target context 未达到严格可评估条件；但从当前计算流程的决策角度，不能把任何一条
+推进为已验证候选，也不应直接进入 final ranking。下一步应优先复核少量诊断结构并
+重新设计序列/界面生成策略，而不是继续扩大同一协议的候选数量。
